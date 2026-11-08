@@ -44,7 +44,12 @@ public class R4_UnaryCancellationFlakeTests
         return (server, channel, state, new OxiaClientRpc(channel.CreateCallInvoker()));
     }
 
-    /// <summary>The ORIGINAL pattern of UnaryCancellation_CancelsTheCall (sleep 100 ms, cancel, wait for the server): fails on a slow transport.</summary>
+    /// <summary>
+    /// The ORIGINAL pattern of UnaryCancellation_CancelsTheCall (sleep 100 ms, cancel, wait for the server) on a slow transport: the
+    /// client side behaves correctly (the call fails as cancelled) but the server never sees the call, so waiting for the server's
+    /// "saw the cancellation" signal times out -- the whole-suite flake.  This test pins that diagnosis (it PASSES by expecting the
+    /// timeout); the real tests now wait for MockOxiaState.Started(id) instead of sleeping.
+    /// </summary>
     [Fact]
     public async Task SleepingFor100msBeforeCancelling_IsNotAGuaranteeThatTheServerHasTheCall()
     {
@@ -59,8 +64,10 @@ public class R4_UnaryCancellationFlakeTests
             Exception ex = await Assert.ThrowsAnyAsync<Exception>(() => call.WaitAsync(TimeSpan.FromSeconds(10)));
             Assert.True(Oxia.Common.Constant.OxiaErrors.IsCanceled(ex), ex.ToString());
 
-            // the client side behaves correctly; only the server-side expectation of the old test is timing dependent
-            await state.Cancellation("slow-unary").Task.WaitAsync(TimeSpan.FromSeconds(3));
+            // the client side behaves correctly; only the server-side expectation of the old test is timing dependent: the request was
+            // cancelled before it reached the server, which therefore never started (nor cancelled) the handler
+            Assert.False(state.Started("slow-unary").Task.IsCompleted);
+            await Assert.ThrowsAsync<TimeoutException>(() => state.Cancellation("slow-unary").Task.WaitAsync(TimeSpan.FromSeconds(2)));
         }
         finally
         {
