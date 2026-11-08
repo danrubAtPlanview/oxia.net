@@ -38,9 +38,17 @@ public sealed class BatcherFactory : Oxia.Client.Batch.BatcherFactory
         Executor = executor;
         Linger = linger;
         MaxRequestsPerBatch = maxRequestsPerBatch;
+        QueueCapacity = DefaultQueueCapacity(maxRequestsPerBatch);
         Metrics = metrics;
         RequestTimeout = requestTimeout;
     }
+
+    /// <summary>
+    /// Go: batcherChannelBufferSize = GOMAXPROCS.  A blocked Go sender costs a goroutine park (~200 ns); a parked .NET caller costs a pooled
+    /// wait object, a lock and two thread pool hops, and with the Go size every add of a thousand concurrent callers parked (-40 % throughput,
+    /// docs/performance.md).  The queue holds what arrives while one full batch is in flight.
+    /// </summary>
+    public static int DefaultQueueCapacity(int maxRequestsPerBatch) => Math.Clamp(maxRequestsPerBatch, 4096, 65_536);
 
     public string Namespace { get; }
 

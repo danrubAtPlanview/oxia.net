@@ -104,6 +104,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
             options.MaxRequestsPerBatch,
             c.Metrics,
             options.RequestTimeout);
+        if (options.BatchQueueCapacity > 0) batcherFactory.QueueCapacity = options.BatchQueueCapacity;
         batcherFactory.WriteRerouter = c.RerouteWrites;
         batcherFactory.ReadRerouter = c.RerouteReads;
         // The shard manager tells the write batchers when shards are replaced
@@ -304,13 +305,17 @@ internal sealed class AsyncClientImpl : IAsyncClient
     {
         if (Sessions is { HasWaitingOperations: true } sessions)
         {
-            sessions.ExecuteOrdered(() => AddToWriteManager(shardId, call));
+            AddPlainWriteOrdered(sessions, shardId, call);
             return;
         }
 
         var add = WriteBatchManager.AddAsync(shardId, call);
         if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, call);
     }
+
+    /// <summary>The (allocating) closure lives in its own method: the C# compiler would allocate it on every entry of the caller.</summary>
+    private void AddPlainWriteOrdered(Sessions sessions, long shardId, object call) =>
+        sessions.ExecuteOrdered(() => AddToWriteManager(shardId, call));
 
     /// <summary>Adds a call to the batcher of a shard without waiting for room: a failure to add fails the call.</summary>
     internal void AddToWriteManager(long shardId, object call)

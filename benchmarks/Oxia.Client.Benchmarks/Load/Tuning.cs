@@ -27,7 +27,7 @@ internal static class Tuning
                     Oxia.Client.CallDispatch.Inline = bool.Parse(value);
                     break;
                 case "queue":
-                    Oxia.Client.Batch.BatcherFactory.BatcherChannelBufferSize = int.Parse(value);
+                    options.Add(OxiaOptions.WithBatchQueueCapacity(int.Parse(value)));
                     break;
                 default:
                     throw new ArgumentException($"unknown tuning knob '{name}'");
