@@ -24,6 +24,12 @@ internal sealed class ReusableTimeout
     public void Arm(TimeSpan timeout)
     {
         var cts = _cts ??= new CancellationTokenSource();
+        if (timeout <= TimeSpan.Zero)
+        {
+            // CancelAfter(0) fires on a timer thread: an expired context is expired right away
+            cts.Cancel();
+            return;
+        }
         // CancelAfter accepts at most uint.MaxValue - 1 milliseconds (~49 days): anything longer never fires in practice.
         cts.CancelAfter(timeout.TotalMilliseconds >= uint.MaxValue - 1 ? Timeout.InfiniteTimeSpan : timeout);
     }

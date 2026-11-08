@@ -2,11 +2,11 @@
 // PORT NOTE
 //   Upstream : oxia/internal/batch/write_batch_test.go
 //   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
-//   Go tests : 11 (TestWriteBatchAdd [4 cases], TestWriteBatchComplete [3 cases], TestWriteBatchRerouteOnShardDeleted,
+//   Go tests : 10 (TestWriteBatchAdd [4 cases], TestWriteBatchComplete [3 cases], TestWriteBatchRerouteOnShardDeleted,
 //              TestWriteBatchOpIndex, TestWriteBatchNoRerouteOnOtherError, TestWriteBatchCanAdd [3 subtests],
 //              TestWriteBatchCanAddPanicsOnRead, TestWriteBatchDropsTheCallsWhoseCallerGaveUp,
 //              TestWriteBatchWithAllTheCallsDropped, TestWriteBatchFailureTellsIfTheRequestWasSent [2 subtests])
-//              ported: 11   skipped: 0
+//              ported: 10   skipped: 0
 //   Adaptations: `metrics.NewMetrics(noop.NewMeterProvider())` -> `new Metrics(null)` (nobody listens: a no-op, like the noop
 //              provider); `batch.Complete()` -> `await batch.CompleteAsync()`; the executor's `(response, err)` is a
 //              ValueTask<WriteResponse> that throws and `prepare func() (*WriteRequest, error)` is a Func<WriteRequest> that
