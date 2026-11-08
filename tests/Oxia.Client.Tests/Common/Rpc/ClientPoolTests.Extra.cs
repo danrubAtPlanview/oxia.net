@@ -349,22 +349,76 @@ public class ClientPoolExtraTests
         return (server, service);
     }
 
+    [Fact]
+    public async Task TheResolverCanMoveTheTargetToAnotherServerLater()
+    {
+        var (first, firstService) = await StartEcho();
+        await using var _first = first;
+        var (second, secondService) = await StartEcho();
+        await using var _second = second;
+        var firstUri = new Uri("http://" + first.Target);
+        var secondUri = new Uri("http://" + second.Target);
+        var factory = new TestResolverFactory("dynamic", [new BalancerAddress(firstUri.Host, firstUri.Port)]);
+        var services = new ServiceCollection().AddSingleton<ResolverFactory>(factory).BuildServiceProvider();
+        await using var pool = new ClientPool(null, null, options => options.ServiceProvider = services);
+        var client = new G.OxiaClient.OxiaClientClient(pool.GetConnectionFromPool("dynamic:///cluster-bootstrap:6648").CallInvoker);
+
+        await client.KeepAliveAsync(new G.SessionHeartbeat());
+        lock (firstService.Headers) Assert.Single(firstService.Hosts);
+
+        // the target "flips": the old server goes away and the resolver now returns the other one
+        await first.DisposeAsync();
+        factory.Update([new BalancerAddress(secondUri.Host, secondUri.Port)]);
+        await Eventually(async () =>
+        {
+            try
+            {
+                await client.KeepAliveAsync(new G.SessionHeartbeat(), deadline: DateTime.UtcNow.AddMilliseconds(500));
+                return true;
+            }
+            catch (RpcException)
+            {
+                return false;
+            }
+        }, TimeSpan.FromSeconds(15), TimeSpan.FromMilliseconds(50));
+
+        lock (secondService.Headers) Assert.Equal("cluster-bootstrap:6648", secondService.Hosts.Last());
+    }
+
     private sealed class TestResolverFactory(string scheme, IReadOnlyList<BalancerAddress> addresses) : ResolverFactory
     {
+        private readonly List<StaticResolver> _resolvers = [];
+        private IReadOnlyList<BalancerAddress> _addresses = addresses;
+
         public int Created;
+
+        public void Update(IReadOnlyList<BalancerAddress> newAddresses)
+        {
+            _addresses = newAddresses;
+            lock (_resolvers) foreach (var resolver in _resolvers) resolver.Push(newAddresses);
+        }
 
         public override string Name => scheme;
 
         public override Resolver Create(ResolverOptions options)
         {
             Interlocked.Increment(ref Created);
-            return new StaticResolver(addresses);
+            var resolver = new StaticResolver(_addresses);
+            lock (_resolvers) _resolvers.Add(resolver);
+            return resolver;
         }
     }
 
-    private sealed class StaticResolver(IReadOnlyList<BalancerAddress> addresses) : Resolver
+    private sealed class StaticResolver(IReadOnlyList<BalancerAddress> initial) : Resolver
     {
+        private IReadOnlyList<BalancerAddress> addresses = initial;
         private Action<ResolverResult>? _listener;
+
+        public void Push(IReadOnlyList<BalancerAddress> newAddresses)
+        {
+            addresses = newAddresses;
+            _listener?.Invoke(ResolverResult.ForResult(newAddresses, serviceConfig: null, serviceConfigStatus: null));
+        }
 
         public override void Start(Action<ResolverResult> listener)
         {

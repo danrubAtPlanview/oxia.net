@@ -282,20 +282,17 @@ public sealed class GrpcClientMetricsInterceptor : Interceptor
             call.ResponseHeadersAsync, call.GetStatus, call.GetTrailers, call.Dispose);
     }
 
-    /// <summary>Go: monitoredClientStream.RecvMsg.</summary>
+    /// <summary>Go: monitoredClientStream.RecvMsg.  A read that completes synchronously costs no allocation.</summary>
     private sealed class MonitoredStreamReader<T>(IAsyncStreamReader<T> inner, MethodMetrics m) : IAsyncStreamReader<T>
     {
         public T Current => inner.Current;
 
-        public async Task<bool> MoveNext(CancellationToken cancellationToken)
+        public Task<bool> MoveNext(CancellationToken cancellationToken)
         {
+            Task<bool> next;
             try
             {
-                if (await inner.MoveNext(cancellationToken).ConfigureAwait(false))
-                {
-                    m.Received();
-                    return true;
-                }
+                next = inner.MoveNext(cancellationToken);
             }
             catch (Exception e)
             {
@@ -303,13 +300,47 @@ public sealed class GrpcClientMetricsInterceptor : Interceptor
                 throw;
             }
 
-            // io.EOF
-            m.HandledWith(null);
-            return false;
+            if (next.IsCompletedSuccessfully)
+            {
+                Observe(next.Result);
+                return next;
+            }
+
+            return ObserveAsync(next);
+        }
+
+        private async Task<bool> ObserveAsync(Task<bool> next)
+        {
+            bool hasNext;
+            try
+            {
+                hasNext = await next.ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                m.HandledWith(e);
+                throw;
+            }
+
+            Observe(hasNext);
+            return hasNext;
+        }
+
+        private void Observe(bool hasNext)
+        {
+            if (hasNext)
+            {
+                m.Received();
+            }
+            else
+            {
+                // io.EOF
+                m.HandledWith(null);
+            }
         }
     }
 
-    /// <summary>Go: monitoredClientStream.SendMsg.</summary>
+    /// <summary>Go: monitoredClientStream.SendMsg.  A write that completes synchronously costs no allocation.</summary>
     private sealed class MonitoredStreamWriter<T>(IClientStreamWriter<T> inner, MethodMetrics m) : IClientStreamWriter<T>
     {
         public WriteOptions? WriteOptions
@@ -318,18 +349,27 @@ public sealed class GrpcClientMetricsInterceptor : Interceptor
             set => inner.WriteOptions = value;
         }
 
-        public async Task WriteAsync(T message)
-        {
-            await inner.WriteAsync(message).ConfigureAwait(false);
-            m.Sent();
-        }
+        public Task WriteAsync(T message) => Observe(inner.WriteAsync(message));
 
-        public async Task WriteAsync(T message, CancellationToken cancellationToken)
-        {
-            await inner.WriteAsync(message, cancellationToken).ConfigureAwait(false);
-            m.Sent();
-        }
+        public Task WriteAsync(T message, CancellationToken cancellationToken) => Observe(inner.WriteAsync(message, cancellationToken));
 
         public Task CompleteAsync() => inner.CompleteAsync();
+
+        private Task Observe(Task write)
+        {
+            if (write.IsCompletedSuccessfully)
+            {
+                m.Sent();
+                return write;
+            }
+
+            return ObserveAsync(write);
+        }
+
+        private async Task ObserveAsync(Task write)
+        {
+            await write.ConfigureAwait(false);
+            m.Sent();
+        }
     }
 }
