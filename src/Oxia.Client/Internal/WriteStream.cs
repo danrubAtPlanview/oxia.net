@@ -100,13 +100,16 @@ internal sealed class StreamWrapper
             {
                 await Stream.SendAsync(req, ct).ConfigureAwait(false);
             }
-            catch
+            catch (Exception e)
             {
                 _failed = true;
-                // The request token fired while the request was being handed over (or the stream is set up): the stream is in
-                // an unknown state and the request must not reach the leader later.
-                if (ct.IsCancellationRequested) Cancel();
-                throw;
+                if (!ct.IsCancellationRequested) throw;
+
+                // The request token fired while the request was being handed over (or the stream is set up): the stream is in an
+                // unknown state and the request must not reach the leader later.  Go returns ctx.Err() here, not the transport's
+                // "call canceled" status.
+                Cancel();
+                throw new OperationCanceledException(e.Message, e, ct);
             }
         }
         finally
