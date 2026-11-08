@@ -34,6 +34,15 @@ internal struct Spares<T> where T : class
         return item;
     }
 
+    /// <summary>Drops the spares above <paramref name="max"/> (a pooled message must not pin the graph of one huge response).</summary>
+    public void Trim(int max)
+    {
+        T[]? items = _items;
+        if (items is null || _count <= max) return;
+        Array.Clear(items, max, _count - max);
+        _count = max;
+    }
+
     public void Push(T item)
     {
         T[]? items = _items;

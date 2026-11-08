@@ -223,7 +223,16 @@ internal sealed class WriteBatch : IBatch, IRecyclableBatch
         }
         else
         {
-            Handle(response!);
+            try
+            {
+                Handle(response!);
+            }
+            finally
+            {
+                // The calls extracted what they need (results are structs, version strings are immutable): the response graph
+                // goes back to its pool.  A response made with `new` (a fake) ignores Release().
+                response!.Release();
+            }
         }
     }
 

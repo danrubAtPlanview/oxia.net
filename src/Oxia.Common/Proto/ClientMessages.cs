@@ -196,18 +196,47 @@ public class WriteRequest
 
 public class WriteResponse
 {
+    internal int PoolState;
     internal Spares<PutResponse> SparePuts;
     internal Spares<DeleteResponse> SpareDeletes;
     internal Spares<DeleteRangeResponse> SpareDeleteRanges;
-    public List<PutResponse> Puts { get; } = new();
-    public List<DeleteResponse> Deletes { get; } = new();
-    public List<DeleteRangeResponse> DeleteRanges { get; } = new();
+    private readonly List<PutResponse> _puts = new();
+    private readonly List<DeleteResponse> _deletes = new();
+    private readonly List<DeleteRangeResponse> _deleteRanges = new();
+    public List<PutResponse> Puts { get { PoolGuard.AssertLive(PoolState); return _puts; } }
+    public List<DeleteResponse> Deletes { get { PoolGuard.AssertLive(PoolState); return _deletes; } }
+    public List<DeleteRangeResponse> DeleteRanges { get { PoolGuard.AssertLive(PoolState); return _deleteRanges; } }
+
     public void Reset()
     {
-        foreach (var e in Puts) { e.Reset(); SparePuts.Push(e); }
-        foreach (var e in Deletes) { e.Reset(); SpareDeletes.Push(e); }
-        foreach (var e in DeleteRanges) { e.Reset(); SpareDeleteRanges.Push(e); }
-        Puts.Clear(); Deletes.Clear(); DeleteRanges.Clear();
+        foreach (var e in _puts) { e.Reset(); SparePuts.Push(e); }
+        foreach (var e in _deletes) { e.Reset(); SpareDeletes.Push(e); }
+        foreach (var e in _deleteRanges) { e.Reset(); SpareDeleteRanges.Push(e); }
+        _puts.Clear(); _deletes.Clear(); _deleteRanges.Clear();
+    }
+
+    /// <summary>A response from the pool (the gRPC deserializer's way to get one).  Its consumer must <see cref="Release"/> it exactly once.</summary>
+    public static WriteResponse Rent()
+    {
+        var m = MessagePool<WriteResponse>.TryRent() ?? new WriteResponse();
+        m.PoolState = PoolStates.Rented;
+        return m;
+    }
+
+    /// <summary>
+    /// Gives a response obtained from <see cref="Rent"/> back to the pool: it is <see cref="Reset"/> (the children are recycled, so
+    /// nothing read from it may be used afterwards).  A no-op for a response made with <c>new</c> and for one already released.
+    /// </summary>
+    public void Release()
+    {
+        if (Interlocked.CompareExchange(ref PoolState, PoolStates.Releasing, PoolStates.Rented) != PoolStates.Rented) return;
+        Reset();
+        SparePuts.Trim(PoolLimits.MaxSpareChildren);
+        SpareDeletes.Trim(PoolLimits.MaxSpareChildren);
+        SpareDeleteRanges.Trim(PoolLimits.MaxSpareChildren);
+        PoolLimits.Trim(_puts); PoolLimits.Trim(_deletes); PoolLimits.Trim(_deleteRanges);
+        Volatile.Write(ref PoolState, PoolStates.Pooled);
+        MessagePool<WriteResponse>.Return(this);
     }
 }
 
@@ -225,6 +254,13 @@ public class GetResponse
 {
     internal int CachedSize;
     internal ProtoVersion? SpareVersion;
+
+    /// <summary>
+    /// Pooled-read mode only (the request asked for pooled values): the value (and, for scans, the key) live in this lease instead of
+    /// <see cref="Value"/> / <see cref="Key"/>, which stay null.  Whoever takes the lease owns it; otherwise Reset() gives it back.
+    /// </summary>
+    internal ValueLease? Lease;
+
     public Status Status;
     public ProtoVersion? Version;
     public byte[]? Value;
@@ -235,24 +271,111 @@ public class GetResponse
         Status = default;
         if (Version is { } v) { v.Reset(); SpareVersion = v; Version = null; }
         Value = null; Key = null; SecondaryIndexKey = null;
+        if (Lease is { } lease) { lease.TryRelease(lease.Generation); Lease = null; }
+    }
+
+    /// <summary>Length of the value in bytes whichever way it is held (0 when absent).</summary>
+    internal int ValueLength => Value?.Length ?? (Lease is { ValueLength: > 0 } l ? l.ValueLength : 0);
+
+    /// <summary>The key of the record: the parsed string, or the decoded key of the lease (null when the response carried none).</summary>
+    internal string? ResolvedKey => Key ?? (Lease is { KeyLength: >= 0 } l ? l.KeyString() : null);
+
+    /// <summary>
+    /// The value as a new exact-size array (null when absent), whichever way it is held.  A leased value is copied out and the lease
+    /// given back, so the response then holds a plain array like any classic response.
+    /// </summary>
+    internal byte[]? TakeValueArray()
+    {
+        if (Lease is { } lease)
+        {
+            Value = lease.CopyValueToArray();
+            if (Key is null && lease.KeyLength >= 0) Key = lease.KeyString();
+            lease.TryRelease(lease.Generation);
+            Lease = null;
+        }
+        return Value;
+    }
+
+    /// <summary>Hands the lease (and with it the duty to release it) to the caller; the response no longer refers to it.</summary>
+    internal ValueLease? DetachLease()
+    {
+        var lease = Lease;
+        Lease = null;
+        return lease;
+    }
+
+    /// <summary>
+    /// A copy that stays valid after the response (and its parent) is released: a multi-shard get keeps the best response of each
+    /// shard while the others are still arriving.  The value array is shared (it belongs to whoever reads it), a lease is copied out.
+    /// </summary>
+    internal GetResponse Clone()
+    {
+        var copy = new GetResponse { Status = Status, Key = ResolvedKey, SecondaryIndexKey = SecondaryIndexKey };
+        copy.Value = Lease is { } lease ? lease.CopyValueToArray() : Value;
+        if (Version is { } v)
+        {
+            copy.Version = new ProtoVersion
+            {
+                VersionId = v.VersionId, ModificationsCount = v.ModificationsCount, CreatedTimestamp = v.CreatedTimestamp,
+                ModifiedTimestamp = v.ModifiedTimestamp, SessionId = v.SessionId, ClientIdentity = v.ClientIdentity,
+            };
+        }
+        return copy;
     }
 }
 
 public class ReadRequest
 {
+    /// <summary>Opt-in pooled read API: the response values are parsed into <see cref="ValueLease"/>s instead of new arrays.</summary>
+    internal bool PooledValues;
     public long? Shard;
     public List<GetRequest> Gets { get; } = new();
-    public void Reset() { Shard = null; Gets.Clear(); }
+    public void Reset() { Shard = null; Gets.Clear(); PooledValues = false; }
 }
 
 public class ReadResponse
 {
+    internal int PoolState;
     internal Spares<GetResponse> SpareGets;
-    public List<GetResponse> Gets { get; } = new();
+    private readonly List<GetResponse> _gets = new();
+    public List<GetResponse> Gets { get { PoolGuard.AssertLive(PoolState); return _gets; } }
+
     public void Reset()
     {
-        foreach (var e in Gets) { e.Reset(); SpareGets.Push(e); }
-        Gets.Clear();
+        foreach (var e in _gets) { e.Reset(); SpareGets.Push(e); }
+        _gets.Clear();
+    }
+
+    public static ReadResponse Rent()
+    {
+        var m = MessagePool<ReadResponse>.TryRent() ?? new ReadResponse();
+        m.PoolState = PoolStates.Rented;
+        return m;
+    }
+
+    /// <summary>See <see cref="WriteResponse.Release"/>.  Values already handed to a caller (the arrays, the detached leases) are not affected.</summary>
+    public void Release()
+    {
+        if (Interlocked.CompareExchange(ref PoolState, PoolStates.Releasing, PoolStates.Rented) != PoolStates.Rented) return;
+        Reset();
+        SpareGets.Trim(PoolLimits.MaxSpareChildren);
+        PoolLimits.Trim(_gets);
+        Volatile.Write(ref PoolState, PoolStates.Pooled);
+        MessagePool<ReadResponse>.Return(this);
+    }
+
+    /// <summary>
+    /// Appends the gets of <paramref name="other"/> (a further chunk of the same stream) to this response.  When the chunk came from the
+    /// pool its children are MOVED here and the chunk is released; a plain chunk keeps its list (the callers of tests may still look at it).
+    /// </summary>
+    internal void Absorb(ReadResponse other)
+    {
+        _gets.AddRange(other._gets);
+        if (other.PoolState == PoolStates.Rented)
+        {
+            other._gets.Clear();
+            other.Release();
+        }
     }
 }
 
@@ -273,13 +396,34 @@ public class ListRequest
 
 public class ListResponse
 {
-    public List<string> Keys { get; } = new();
+    internal int PoolState;
+    private readonly List<string> _keys = new();
+    public List<string> Keys { get { PoolGuard.AssertLive(PoolState); return _keys; } }
     public bool EndInclusive;
-    public void Reset() { Keys.Clear(); EndInclusive = false; }
+    public void Reset() { _keys.Clear(); EndInclusive = false; }
+
+    public static ListResponse Rent()
+    {
+        var m = MessagePool<ListResponse>.TryRent() ?? new ListResponse();
+        m.PoolState = PoolStates.Rented;
+        return m;
+    }
+
+    /// <summary>See <see cref="WriteResponse.Release"/>.  The key strings stay valid (strings are immutable); only the list is recycled.</summary>
+    public void Release()
+    {
+        if (Interlocked.CompareExchange(ref PoolState, PoolStates.Releasing, PoolStates.Rented) != PoolStates.Rented) return;
+        Reset();
+        PoolLimits.Trim(_keys);
+        Volatile.Write(ref PoolState, PoolStates.Pooled);
+        MessagePool<ListResponse>.Return(this);
+    }
 }
 
 public class RangeScanRequest
 {
+    /// <summary>Opt-in pooled scan API: the record values and keys are parsed into <see cref="ValueLease"/>s instead of new arrays and strings.</summary>
+    internal bool PooledValues;
     public long? Shard;
     public string StartInclusive = "";
     public string EndExclusive = "";
@@ -291,19 +435,39 @@ public class RangeScanRequest
     public void Reset()
     {
         Shard = null; StartInclusive = ""; EndExclusive = ""; SecondaryIndexName = null;
-        IncludeInternalKeys = false; EndInclusive = false; IncludeValues = null;
+        IncludeInternalKeys = false; EndInclusive = false; IncludeValues = null; PooledValues = false;
     }
 }
 
 public class RangeScanResponse
 {
+    internal int PoolState;
     internal Spares<GetResponse> SpareRecords;
-    public List<GetResponse> Records { get; } = new();
+    private readonly List<GetResponse> _records = new();
+    public List<GetResponse> Records { get { PoolGuard.AssertLive(PoolState); return _records; } }
     public bool EndInclusive;
     public void Reset()
     {
-        foreach (var e in Records) { e.Reset(); SpareRecords.Push(e); }
-        Records.Clear(); EndInclusive = false;
+        foreach (var e in _records) { e.Reset(); SpareRecords.Push(e); }
+        _records.Clear(); EndInclusive = false;
+    }
+
+    public static RangeScanResponse Rent()
+    {
+        var m = MessagePool<RangeScanResponse>.TryRent() ?? new RangeScanResponse();
+        m.PoolState = PoolStates.Rented;
+        return m;
+    }
+
+    /// <summary>See <see cref="ReadResponse.Release"/>.</summary>
+    public void Release()
+    {
+        if (Interlocked.CompareExchange(ref PoolState, PoolStates.Releasing, PoolStates.Rented) != PoolStates.Rented) return;
+        Reset();
+        SpareRecords.Trim(PoolLimits.MaxSpareChildren);
+        PoolLimits.Trim(_records);
+        Volatile.Write(ref PoolState, PoolStates.Pooled);
+        MessagePool<RangeScanResponse>.Return(this);
     }
 }
 
@@ -384,15 +548,35 @@ public class NotificationEntry
 
 public class NotificationBatch
 {
+    internal int PoolState;
     internal Spares<NotificationEntry> SpareNotifications;
     public long Shard;
     public long Offset;
     public ulong Timestamp;
-    public List<NotificationEntry> Notifications { get; } = new();
+    private readonly List<NotificationEntry> _notifications = new();
+    public List<NotificationEntry> Notifications { get { PoolGuard.AssertLive(PoolState); return _notifications; } }
     public void Reset()
     {
         Shard = 0; Offset = 0; Timestamp = 0;
-        foreach (var e in Notifications) { e.Reset(); SpareNotifications.Push(e); }
-        Notifications.Clear();
+        foreach (var e in _notifications) { e.Reset(); SpareNotifications.Push(e); }
+        _notifications.Clear();
+    }
+
+    public static NotificationBatch Rent()
+    {
+        var m = MessagePool<NotificationBatch>.TryRent() ?? new NotificationBatch();
+        m.PoolState = PoolStates.Rented;
+        return m;
+    }
+
+    /// <summary>See <see cref="WriteResponse.Release"/>.  The entries (and their strings) must not be used afterwards.</summary>
+    public void Release()
+    {
+        if (Interlocked.CompareExchange(ref PoolState, PoolStates.Releasing, PoolStates.Rented) != PoolStates.Rented) return;
+        Reset();
+        SpareNotifications.Trim(PoolLimits.MaxSpareChildren);
+        PoolLimits.Trim(_notifications);
+        Volatile.Write(ref PoolState, PoolStates.Pooled);
+        MessagePool<NotificationBatch>.Return(this);
     }
 }

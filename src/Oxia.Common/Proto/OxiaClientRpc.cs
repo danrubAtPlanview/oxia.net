@@ -96,13 +96,15 @@ public sealed class OxiaClientRpc : IOxiaClientRpc
         => new WriteStreamCall(_invoker.AsyncDuplexStreamingCall(OxiaClientMethods.WriteStream, null, new CallOptions(headers, cancellationToken: ct)), ct);
 
     public IServerStreamingClient<ReadResponse> Read(ReadRequest request, CancellationToken ct)
-        => new ServerStreamingClient<ReadResponse>(_invoker.AsyncServerStreamingCall(OxiaClientMethods.Read, null, new CallOptions(cancellationToken: ct), request));
+        => new ServerStreamingClient<ReadResponse>(_invoker.AsyncServerStreamingCall(
+            request.PooledValues ? OxiaClientMethods.ReadPooled : OxiaClientMethods.Read, null, new CallOptions(cancellationToken: ct), request));
 
     public IServerStreamingClient<ListResponse> List(ListRequest request, CancellationToken ct)
         => new ServerStreamingClient<ListResponse>(_invoker.AsyncServerStreamingCall(OxiaClientMethods.List, null, new CallOptions(cancellationToken: ct), request));
 
     public IServerStreamingClient<RangeScanResponse> RangeScan(RangeScanRequest request, CancellationToken ct)
-        => new ServerStreamingClient<RangeScanResponse>(_invoker.AsyncServerStreamingCall(OxiaClientMethods.RangeScan, null, new CallOptions(cancellationToken: ct), request));
+        => new ServerStreamingClient<RangeScanResponse>(_invoker.AsyncServerStreamingCall(
+            request.PooledValues ? OxiaClientMethods.RangeScanPooled : OxiaClientMethods.RangeScan, null, new CallOptions(cancellationToken: ct), request));
 
     public IServerStreamingClient<ShardAssignments> GetShardAssignments(ShardAssignmentsRequest request, CancellationToken ct)
         => new ServerStreamingClient<ShardAssignments>(_invoker.AsyncServerStreamingCall(OxiaClientMethods.GetShardAssignments, null, new CallOptions(cancellationToken: ct), request));

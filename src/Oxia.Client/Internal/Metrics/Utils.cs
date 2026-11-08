@@ -136,7 +136,7 @@ internal static class MetricsUtils
         var gets = response.Gets;
         for (int i = 0; i < gets.Count; i++)
         {
-            valueSize += gets[i].Value?.Length ?? 0;
+            valueSize += gets[i].ValueLength;
         }
         return (valueSize, gets.Count);
     }

@@ -25,6 +25,7 @@
 using Microsoft.Extensions.Logging;
 using Oxia.Client.Batch;
 using Oxia.Client.Internal.Model;
+using Oxia.Client.Pooled;
 using Oxia.Common.Constant;
 using Oxia.Common.Logging;
 using Oxia.Common.Proto;
@@ -70,6 +71,7 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
     private long _shardId;
     private bool _recordMetrics;
     private long _batchStart;
+    private bool _pooledValues;
 
     internal ReadBatch(ReadBatchFactory factory) => _factory = factory;
 
@@ -90,6 +92,9 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
             throw new InvalidOperationException("invalid call");
         }
         var metrics = _factory.Metrics;
+        // The opt-in pooled read API: ONE pooled call makes the server's values land in leases for the whole response (checked on the
+        // call itself, a metrics decorator is a plain copy)
+        if (get is IPooledValueCall) _pooledValues = true;
         _gets.Add(metrics is null ? get : metrics.DecorateGet(get));
     }
 
@@ -146,7 +151,15 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
         }
         else
         {
-            Handle(response!);
+            try
+            {
+                Handle(response!);
+            }
+            finally
+            {
+                // Every get took what it needs (value arrays are the caller's, leases were detached): recycle the response graph
+                response!.Release();
+            }
         }
     }
 
@@ -179,6 +192,7 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
     {
         _request.Reset();
         _request.Shard = _shardId;
+        _request.PooledValues = _pooledValues;
         for (int i = 0; i < _gets.Count; i++)
         {
             _request.Gets.Add(_gets[i]);
@@ -190,6 +204,7 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
     {
         _gets.Clear();
         _request.Reset();
+        _pooledValues = false;
         _recordMetrics = false;
         _factory.Return(this);
     }

@@ -102,7 +102,7 @@ public readonly struct ProtoVersionCodec : IMessageCodec<ProtoVersion>
                 case 25: m.CreatedTimestamp = r.ReadFixed64(); break;
                 case 33: m.ModifiedTimestamp = r.ReadFixed64(); break;
                 case 40: m.SessionId = r.ReadInt64(); break;
-                case 50: m.ClientIdentity = r.ReadString(); break;
+                case 50: m.ClientIdentity = r.ReadStringCached(); break; // the same few identities answer every ephemeral record
                 default: r.SkipField(tag); break;
             }
         }
@@ -643,9 +643,10 @@ public readonly struct WriteRequestCodec : IMessageCodec<WriteRequest>
     public static void Parse(in ReadOnlySequence<byte> data, WriteRequest m) => MessageCodec.Parse<WriteRequestCodec, WriteRequest>(in data, m);
 }
 
-public readonly struct WriteResponseCodec : IMessageCodec<WriteResponse>
+public readonly struct WriteResponseCodec : IPooledMessageCodec<WriteResponse>
 {
     public static WriteResponse Create() => new();
+    public static WriteResponse Rent() => WriteResponse.Rent();
     public static void Reset(WriteResponse m) => m.Reset();
 
     public static int Size(WriteResponse m)

@@ -245,7 +245,7 @@ public sealed class RpcProvider : IRpcProvider
             if (recv is null) return response ?? new ReadResponse();
 
             if (response is null) response = recv;
-            else response.Gets.AddRange(recv.Gets);
+            else response.Absorb(recv); // a pooled chunk gives its gets to the first response and goes back to the pool
         }
     }
 
@@ -263,6 +263,7 @@ public sealed class RpcProvider : IRpcProvider
                 if (response is null) return null;
 
                 var err = listResponseConsumer(response);
+                response.Release(); // the consumer copied what it keeps (the key strings are immutable)
                 if (err is not null) throw OxiaErrors.ToThrowable(err);
                 verified = true;
             }
@@ -284,6 +285,7 @@ public sealed class RpcProvider : IRpcProvider
                 if (response is null) return null;
 
                 var err = rangeScanResponseConsumer(response);
+                response.Release(); // the consumer took the value arrays / leases it keeps
                 if (err is not null) throw OxiaErrors.ToThrowable(err);
                 verified = true;
             }

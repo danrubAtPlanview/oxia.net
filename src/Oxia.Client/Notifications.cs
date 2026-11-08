@@ -431,6 +431,9 @@ internal sealed class ShardNotificationsManager
                 await MultiplexNotificationBatchAsync(nb).ConfigureAwait(false);
 
                 LastOffsetReceived = nb.Offset;
+
+                // Every notification was converted into the user-facing objects: the batch goes back to its pool
+                nb.Release();
             }
         }
         finally

@@ -273,7 +273,10 @@ internal sealed class MultiShardGet : IValueTaskSource<GetResult>
                 return;
             }
 
-            _selected = AsyncClientImpl.SelectResponse(_comparisonType, _order, _selected, response);
+            var chosen = AsyncClientImpl.SelectResponse(_comparisonType, _order, _selected, response);
+
+            // The response belongs to a batch response that is recycled once its calls completed: keep a copy of the one selected
+            _selected = ReferenceEquals(chosen, response) ? response!.Clone() : chosen;
 
             _counter--;
             if (_counter == 0)

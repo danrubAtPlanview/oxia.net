@@ -146,9 +146,10 @@ public readonly struct NotificationEntryCodec : IMessageCodec<NotificationEntry>
     public static void Parse(in ReadOnlySequence<byte> data, NotificationEntry m) => MessageCodec.Parse<NotificationEntryCodec, NotificationEntry>(in data, m);
 }
 
-public readonly struct NotificationBatchCodec : IMessageCodec<NotificationBatch>
+public readonly struct NotificationBatchCodec : IPooledMessageCodec<NotificationBatch>
 {
     public static NotificationBatch Create() => new();
+    public static NotificationBatch Rent() => NotificationBatch.Rent();
     public static void Reset(NotificationBatch m) => m.Reset();
 
     public static int Size(NotificationBatch m)
