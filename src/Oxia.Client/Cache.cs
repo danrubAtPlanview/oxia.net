@@ -21,7 +21,6 @@
 //        they allocate (boxing) only on the Put and on the load, never on a hit.
 //      * NewCache returns (Cache, error) in Go: here `Cache.NewAsync<T>` (throws) is the implementation, and `Cache.New<T>` is
 //        a BLOCKING convenience over it (the contract signature has no ValueTask) -- prefer NewAsync.
-//      * `Optional[T]` is passed to ModifyFunc as an IOptional<T> backed by a private implementation (CacheOptional<T>).
 //      * slog.Debug "Received notification" carries its attributes inline in the message ("... key=.. type=.. version-id=..").
 // =====================================================================================================================
 using Microsoft.Extensions.Logging;
@@ -247,30 +246,6 @@ internal sealed class CachedEntry<TValue>
     {
         Value = value; Version = version; Present = present;
     }
-}
-
-/// <summary>Go: optionalOf / empty for the value passed to ModifyFunc.</summary>
-internal sealed class CacheOptional<T> : IOptional<T>
-{
-    private static readonly CacheOptional<T> NoValue = new(default, false);
-    private readonly T? _value;
-    private readonly bool _present;
-
-    private CacheOptional(T? value, bool present) { _value = value; _present = present; }
-
-    public static CacheOptional<T> Of(T value) => new(value, true);
-    public static CacheOptional<T> None() => NoValue;
-
-    public bool Present => _present;
-    public bool Empty => !_present;
-
-    public bool TryGet(out T value)
-    {
-        value = _value!;
-        return _present;
-    }
-
-    public T MustGet() => _present ? _value! : throw new InvalidOperationException("optional empty on MustGet call");
 }
 
 // The loads of a key in flight, and the evictions of the key since the first one started.
@@ -539,12 +514,12 @@ internal sealed class CacheImpl<TValue> : ICache<TValue>, IInternalCache
         if (got.Err is not null)
         {
             if (!OxiaErrors.Is(got.Err, ClientErrors.KeyNotFound)) throw new PermanentException(got.Err);
-            optValue = CacheOptional<TValue>.None();
+            optValue = Optional.Empty<TValue>();
             versionId = RecordVersion.VersionIdNotExists;
         }
         else
         {
-            optValue = CacheOptional<TValue>.Of(got.Value!);
+            optValue = Optional.Of(got.Value!);
             versionId = got.Version.VersionId;
         }
 
