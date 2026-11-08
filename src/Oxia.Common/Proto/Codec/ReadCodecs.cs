@@ -35,7 +35,9 @@ public readonly struct GetRequestCodec : IMessageCodec<GetRequest>
         int size = m.CachedSize;
         if (size > ProtoWriter.BlockLimit)
         {
+            long start = w.BytesWritten;
             WriteChunked(ref w, m);
+            if (w.BytesWritten - start != size) ThrowStale();
             return;
         }
         Span<byte> d = w.Reserve(size);
@@ -49,7 +51,9 @@ public readonly struct GetRequestCodec : IMessageCodec<GetRequest>
         if (size > ProtoWriter.BlockLimit)
         {
             w.WriteTagLength(tag, size);
+            long start = w.BytesWritten;
             WriteChunked(ref w, m);
+            if (w.BytesWritten - start != size) ThrowStale();
             return;
         }
         int total = 1 + SizeOfLength(size) + size;

@@ -151,7 +151,9 @@ public readonly struct PutRequestCodec : IMessageCodec<PutRequest>
         int size = m.CachedSize;
         if (size > ProtoWriter.BlockLimit)
         {
+            long start = w.BytesWritten;
             WriteChunked(ref w, m);
+            if (w.BytesWritten - start != size) ThrowStale();
             return;
         }
         Span<byte> d = w.Reserve(size);
@@ -166,7 +168,9 @@ public readonly struct PutRequestCodec : IMessageCodec<PutRequest>
         if (size > ProtoWriter.BlockLimit)
         {
             w.WriteTagLength(tag, size);
+            long start = w.BytesWritten;
             WriteChunked(ref w, m);
+            if (w.BytesWritten - start != size) ThrowStale();
             return;
         }
         int total = 1 + SizeOfLength(size) + size;
@@ -366,7 +370,9 @@ public readonly struct DeleteRequestCodec : IMessageCodec<DeleteRequest>
         int size = m.CachedSize;
         if (size > ProtoWriter.BlockLimit)
         {
+            long start = w.BytesWritten;
             WriteChunked(ref w, m);
+            if (w.BytesWritten - start != size) ThrowStale();
             return;
         }
         Span<byte> d = w.Reserve(size);
@@ -380,7 +386,9 @@ public readonly struct DeleteRequestCodec : IMessageCodec<DeleteRequest>
         if (size > ProtoWriter.BlockLimit)
         {
             w.WriteTagLength(tag, size);
+            long start = w.BytesWritten;
             WriteChunked(ref w, m);
+            if (w.BytesWritten - start != size) ThrowStale();
             return;
         }
         int total = 1 + SizeOfLength(size) + size;
@@ -481,7 +489,9 @@ public readonly struct DeleteRangeRequestCodec : IMessageCodec<DeleteRangeReques
         int size = m.CachedSize;
         if (size > ProtoWriter.BlockLimit)
         {
+            long start = w.BytesWritten;
             WriteChunked(ref w, m);
+            if (w.BytesWritten - start != size) ThrowStale();
             return;
         }
         Span<byte> d = w.Reserve(size);
@@ -495,7 +505,9 @@ public readonly struct DeleteRangeRequestCodec : IMessageCodec<DeleteRangeReques
         if (size > ProtoWriter.BlockLimit)
         {
             w.WriteTagLength(tag, size);
+            long start = w.BytesWritten;
             WriteChunked(ref w, m);
+            if (w.BytesWritten - start != size) ThrowStale();
             return;
         }
         int total = 1 + SizeOfLength(size) + size;
