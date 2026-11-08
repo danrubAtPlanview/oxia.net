@@ -19,37 +19,103 @@
 //              code never runs on the batcher loop that completes the calls (a Go goroutine woken by a channel send is
 //              scheduled, not run inline).  A `Callback` set by a decorator (metrics) on the call is still invoked.
 // =====================================================================================================================
+using System.Collections.Concurrent;
 using System.Threading.Tasks.Sources;
 using Oxia.Client.Internal.Model;
 using Oxia.Common.Proto;
 
 namespace Oxia.Client;
 
-/// <summary>A small bounded LIFO pool of reusable call objects (lock-protected array stack, allocation free).</summary>
+/// <summary>
+/// A bounded pool of reusable call objects.  Level 1 is a small per-thread stack: the thread that completes an operation (the
+/// awaiter's continuation recycles the call in GetResult) is almost always the one that rents the next call (its loop), so the hot
+/// path never touches shared state -- the single lock of the previous array-stack pool was the most contended point of the client
+/// with a thousand producers (docs/performance.md).  Level 2 is a lock-free queue, bounded by <c>capacity</c>, that threads spill to
+/// and refill from in chunks.  One pool instance per closed generic type (the thread-local cache is a static of the generic type).
+/// </summary>
 internal sealed class CallPool<T> where T : class
 {
-    private readonly object _gate = new();
-    private readonly T?[] _items;
-    private int _count;
+    private const int LocalCapacity = 32;
+    private const int Chunk = LocalCapacity / 2;
 
-    public CallPool(int capacity) => _items = new T?[capacity];
+    private sealed class Local
+    {
+        public readonly T?[] Items = new T?[LocalCapacity];
+        public int Count;
+    }
+
+    [ThreadStatic]
+    private static Local? t_local;
+
+    private readonly ConcurrentQueue<T> _shared = new();
+    private readonly int _capacity;
+    private int _sharedCount;
+
+    public CallPool(int capacity) => _capacity = capacity;
 
     public T? TryRent()
     {
-        lock (_gate)
+        var local = t_local;
+        if (local is not null && local.Count > 0)
         {
-            if (_count == 0) return null;
-            var item = _items[--_count];
-            _items[_count] = null;
+            var item = local.Items[--local.Count];
+            local.Items[local.Count] = null;
             return item;
         }
+        return TryRentSlow();
+    }
+
+    private T? TryRentSlow()
+    {
+        if (!_shared.TryDequeue(out var item)) return null;
+
+        // refill the thread cache with a chunk so the next rents stay local
+        var local = t_local ??= new Local();
+        int taken = 0;
+        while (taken < Chunk && _shared.TryDequeue(out var more))
+        {
+            local.Items[local.Count++] = more;
+            taken++;
+        }
+        Interlocked.Add(ref _sharedCount, -(taken + 1));
+        return item;
     }
 
     public void Return(T item)
     {
-        lock (_gate)
+        var local = t_local ??= new Local();
+        if (local.Count < LocalCapacity)
         {
-            if (_count < _items.Length) _items[_count++] = item;
+            local.Items[local.Count++] = item;
+            return;
+        }
+        ReturnSlow(local, item);
+    }
+
+    private void ReturnSlow(Local local, T item)
+    {
+        // spill the older half of the thread cache (and this item) to the shared queue; drop what exceeds the bound
+        int room = _capacity - Volatile.Read(ref _sharedCount);
+        int spilled = 0;
+        if (room > 0)
+        {
+            int n = Math.Min(Chunk, room - 1);
+            for (int i = 0; i < n; i++)
+            {
+                _shared.Enqueue(local.Items[i]!);
+                spilled++;
+            }
+            _shared.Enqueue(item);
+            spilled++;
+            Interlocked.Add(ref _sharedCount, spilled);
+            // compact the remaining items
+            Array.Copy(local.Items, n, local.Items, 0, local.Count - n);
+            Array.Clear(local.Items, local.Count - n, n);
+            local.Count -= n;
+        }
+        else
+        {
+            // the shared pool is full: keep the local cache as it is and let the item go
         }
     }
 }

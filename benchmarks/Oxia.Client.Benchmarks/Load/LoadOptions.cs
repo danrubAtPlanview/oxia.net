@@ -189,6 +189,7 @@ public sealed class LoadOptions
 
         server     --server docker|echo|host:port   docker = reusable oxia-net-tests container (a fresh server per run; default, or OXIA_TEST_ADDRESS)
                                                     echo   = in-process zero-allocation RawEchoServer (CPU-bound analysis of the client)
+                                                    echo-proc = the same in a child process (client-only CPU figures; works with --go)
                    --shards N  --no-notifications   profile of the docker server
         workload   --client async|sync  --ops put,get,delete  --read-percent 50  --keys 100000  --value-size 128  --random-payload
                    --producers 64      closed loop: this many operations in flight (each producer awaits its operation, then issues the next)

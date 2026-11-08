@@ -28,14 +28,16 @@ internal sealed class LoadServer : IAsyncDisposable
     private readonly OxiaServer? _docker;
     private readonly TestGrpcServer? _echo;
     private readonly string? _container;
+    private readonly Process? _child;
 
-    private LoadServer(string address, string description, OxiaServer? docker, TestGrpcServer? echo, string? container)
+    private LoadServer(string address, string description, OxiaServer? docker, TestGrpcServer? echo, string? container, Process? child = null)
     {
         Address = address;
         Description = description;
         _docker = docker;
         _echo = echo;
         _container = container;
+        _child = child;
     }
 
     public string Address { get; }
@@ -55,6 +57,28 @@ internal sealed class LoadServer : IAsyncDisposable
                 var server = await TestGrpcServer.StartAsync(app => app.MapGrpcService<RawEchoServer>(), services => services.AddSingleton(echo));
                 echo.Address = server.Address;
                 return new LoadServer(server.Address, "in-process RawEchoServer (zero allocation)", null, server, null);
+            }
+            case "echo-proc":
+            {
+                // The same echo server in a CHILD process: the CPU time and the allocations of this process are the client's alone, and a Go
+                // client can be pointed at it too (CPU-bound head to head without a real server).
+                var psi = new ProcessStartInfo(Environment.ProcessPath!, [Environment.GetCommandLineArgs()[0], "load", "--serve-echo"])
+                {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardInput = true,
+                };
+                if (!Path.GetFileNameWithoutExtension(Environment.ProcessPath!).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+                {
+                    psi.ArgumentList.Clear();
+                    psi.ArgumentList.Add("load");
+                    psi.ArgumentList.Add("--serve-echo");
+                }
+                var child = Process.Start(psi)!;
+                string? line = await child.StandardOutput.ReadLineAsync();
+                if (line is null || !line.StartsWith("ECHO ", StringComparison.Ordinal)) throw new InvalidOperationException("the echo server did not start: " + line);
+                return new LoadServer(line[5..].Trim(), "RawEchoServer in a child process (zero allocation, no real work)", null, null, null, child);
             }
             case "docker":
             {
@@ -105,5 +129,21 @@ internal sealed class LoadServer : IAsyncDisposable
     {
         if (_docker is not null) await _docker.DisposeAsync();
         if (_echo is not null) await _echo.DisposeAsync();
+        if (_child is not null)
+        {
+            try { _child.Kill(true); } catch (InvalidOperationException) { }
+            _child.Dispose();
+        }
+    }
+
+    /// <summary>`load --serve-echo`: runs the echo server until the parent kills this process; prints "ECHO host:port" once it listens.</summary>
+    public static async Task ServeEchoAsync()
+    {
+        var echo = new RawEchoServer();
+        await using var server = await TestGrpcServer.StartAsync(app => app.MapGrpcService<RawEchoServer>(), services => services.AddSingleton(echo));
+        echo.Address = server.Address;
+        Console.Out.WriteLine("ECHO " + server.Address);
+        Console.Out.Flush();
+        await Task.Delay(Timeout.Infinite);
     }
 }

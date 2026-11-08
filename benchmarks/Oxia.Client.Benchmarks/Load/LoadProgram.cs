@@ -15,6 +15,12 @@ public static class LoadProgram
 {
     public static async Task<int> RunAsync(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--serve-echo")
+        {
+            await LoadServer.ServeEchoAsync();
+            return 0;
+        }
+
         LoadOptions options;
         try
         {
