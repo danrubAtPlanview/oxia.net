@@ -20,6 +20,8 @@ using Xunit;
 
 namespace Oxia.Client.Tests.Review;
 
+// Asserts on wall-clock latency (median of a lone call with a 1 ms linger): run it alone, not next to ~1800 parallel tests.
+[Collection("R1 serial")]
 public class R1_BatcherLoopTests
 {
     private static readonly AsyncLocal<string?> Ambient = new();
