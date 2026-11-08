@@ -111,7 +111,7 @@ public sealed class ShardManager : IShardManager
         if (err is OperationCanceledException && !IsClosed)
         {
             // the request timeout elapsed: Go's context.DeadlineExceeded
-            return new TimeoutException("context deadline exceeded", err);
+            return new TimeoutException("context deadline exceeded");
         }
 
         return err;
@@ -396,11 +396,19 @@ public sealed class ShardManager : IShardManager
     /// <summary>Everything a reader needs, immutable once published.</summary>
     private sealed class ShardMap
     {
+        /// <summary>Up to this many shards the candidate is found by a backwards linear scan, without a bucket table.</summary>
+        private const int LinearLimit = 4;
+
+        /// <summary>The linear walk from the bucket's first candidate gives up after this many steps and binary-searches instead.</summary>
+        private const int MaxBucketWalk = 3;
+
         public readonly Shard[] Shards;
         private readonly uint[] _mins;
         private readonly uint[] _maxs;
         private readonly long[] _ids;
         private readonly bool _disjoint;
+        private readonly int[]? _bucketFirst;
+        private readonly int _bucketShift;
         public readonly Dictionary<long, Shard> ById;
         public readonly Dictionary<long, Shard[]> Successors;
         public readonly long[] AllIds;
@@ -415,17 +423,36 @@ public sealed class ShardManager : IShardManager
             _mins = new uint[shards.Length];
             _maxs = new uint[shards.Length];
             _ids = new long[shards.Length];
-            AllIds = (long[])_ids.Clone(); // handed out by GetAll(): a caller that modified it must not corrupt the lookup arrays
+            AllIds = new long[shards.Length]; // handed out by GetAll(): a caller that modified it must not corrupt the lookup arrays
             bool disjoint = true;
             for (int i = 0; i < shards.Length; i++)
             {
                 _mins[i] = shards[i].HashRange.MinInclusive;
                 _maxs[i] = shards[i].HashRange.MaxInclusive;
-                _ids[i] = shards[i].Id;
+                _ids[i] = AllIds[i] = shards[i].Id;
                 if (_mins[i] > _maxs[i] || (i > 0 && _mins[i] <= _maxs[i - 1])) disjoint = false;
             }
 
             _disjoint = disjoint;
+
+            if (disjoint && shards.Length > LinearLimit)
+            {
+                // A direct-mapped table over the top bits of the hash gives, for every bucket of the hash space, the last shard that
+                // starts at or before the start of the bucket: the shard of a hash is at most a few steps after it (shards of a
+                // namespace split the hash space evenly, so with ~4 buckets per shard it is almost always the first candidate).
+                int bits = Math.Min(12, 32 - System.Numerics.BitOperations.LeadingZeroCount((uint)(shards.Length - 1)) + 2);
+                _bucketShift = 32 - bits;
+                var first = new int[1 << bits];
+                int j = 0;
+                for (int b = 0; b < first.Length; b++)
+                {
+                    uint start = (uint)((ulong)b << _bucketShift);
+                    while (j + 1 < _mins.Length && _mins[j + 1] <= start) j++;
+                    first[b] = j;
+                }
+
+                _bucketFirst = first;
+            }
         }
 
         public static ShardMap Create(Dictionary<long, Shard> byId, Dictionary<long, Shard[]> successors, Task changed)
@@ -442,31 +469,7 @@ public sealed class ShardManager : IShardManager
         public bool TryFind(uint code, out long id)
         {
             var mins = _mins;
-            if (_disjoint)
-            {
-                // the last range that starts at or before the code is the only candidate
-                int lo = 0, hi = mins.Length - 1, candidate = -1;
-                while (lo <= hi)
-                {
-                    int mid = (int)((uint)(lo + hi) >> 1);
-                    if (mins[mid] <= code)
-                    {
-                        candidate = mid;
-                        lo = mid + 1;
-                    }
-                    else
-                    {
-                        hi = mid - 1;
-                    }
-                }
-
-                if (candidate >= 0 && code <= _maxs[candidate])
-                {
-                    id = _ids[candidate];
-                    return true;
-                }
-            }
-            else
+            if (!_disjoint)
             {
                 // overlapping ranges (never sent by a server): first match, like the linear scan of the Go code
                 for (int i = 0; i < mins.Length; i++)
@@ -477,10 +480,54 @@ public sealed class ShardManager : IShardManager
                         return true;
                     }
                 }
+
+                id = 0;
+                return false;
+            }
+
+            // the ranges are disjoint and sorted: the only candidate is the last range that starts at or before the code
+            int candidate;
+            if (_bucketFirst is { } table)
+            {
+                candidate = table[code >> _bucketShift];
+                for (int steps = 0; candidate + 1 < mins.Length && mins[candidate + 1] <= code; steps++)
+                {
+                    if (steps == MaxBucketWalk)
+                    {
+                        candidate = LastAtOrBefore(mins, candidate + 1, mins.Length - 1, code);
+                        break;
+                    }
+
+                    candidate++;
+                }
+            }
+            else
+            {
+                candidate = mins.Length - 1;
+                while (candidate >= 0 && mins[candidate] > code) candidate--;
+            }
+
+            if ((uint)candidate < (uint)mins.Length && mins[candidate] <= code && code <= _maxs[candidate])
+            {
+                id = _ids[candidate];
+                return true;
             }
 
             id = 0;
             return false;
+        }
+
+        /// <summary>The last index in [lo, hi] whose min is at or before the code; mins[lo] &lt;= code is required.</summary>
+        private static int LastAtOrBefore(uint[] mins, int lo, int hi, uint code)
+        {
+            while (lo < hi)
+            {
+                int mid = (int)((uint)(lo + hi + 1) >> 1);
+                if (mins[mid] <= code) lo = mid;
+                else hi = mid - 1;
+            }
+
+            return lo;
         }
     }
 }

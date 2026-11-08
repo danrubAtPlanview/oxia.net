@@ -37,6 +37,7 @@
 // =====================================================================================================================
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Net.Security;
 using Grpc.Core;
 using Grpc.Net.Client;
@@ -144,43 +145,87 @@ public sealed class RpcProvider : IRpcProvider
 
     // ----- shard requests -------------------------------------------------------------------------------------------
 
-    public ValueTask<WriteResponse> ExecuteWrite(CancellationToken ct, long shardId, Func<WriteRequest> prepare)
+    public async ValueTask<WriteResponse> ExecuteWrite(CancellationToken ct, long shardId, Func<WriteRequest> prepare)
     {
+        // The first attempt runs inline: only a failed one pays for the retry machinery.
+        Task? changed = ShardMapChanged();
+        Exception failure;
+        try
+        {
+            return await WriteAttempt(ct, shardId, prepare, null).ConfigureAwait(false);
+        }
+        catch (Exception e)
+        {
+            failure = e;
+        }
+
         // A change of the shard map ends the wait for the next attempt: once a shard is split, the other shards hold their writes
         // until the batches pending on it are rerouted.
-        var timer = new ShardMapTimer();
-        return ExecuteWithRetryTimer(ct, timer, async hint =>
+        var timer = new ShardMapTimer { Changed = changed };
+        bool first = true;
+        return await ExecuteWithRetryTimer(ct, timer, hint =>
         {
+            if (first)
+            {
+                first = false;
+                ExceptionDispatchInfo.Throw(failure); // the failed first attempt enters the loop like any failed attempt
+            }
+
             timer.Changed = ShardMapChanged();
-            string target = GetTargetByShard(shardId, hint);
-            var sw = await GetWriteStream(ct, shardId, target).ConfigureAwait(false);
-            return await sw.Send(ct, prepare).ConfigureAwait(false);
-        }, IsRetryableShardRequestFunc);
+            return WriteAttempt(ct, shardId, prepare, hint);
+        }, IsRetryableShardRequestFunc).ConfigureAwait(false);
     }
 
-    public ValueTask<ReadResponse> ExecuteRead(CancellationToken ct, ReadRequest request) =>
-        ExecuteWithRetry(ct, async hint =>
+    private async ValueTask<WriteResponse> WriteAttempt(CancellationToken ct, long shardId, Func<WriteRequest> prepare, ErrorMetadata? hint)
+    {
+        string target = GetTargetByShard(shardId, hint);
+        var sw = await GetWriteStream(ct, shardId, target).ConfigureAwait(false);
+        return await sw.Send(ct, prepare).ConfigureAwait(false);
+    }
+
+    public async ValueTask<ReadResponse> ExecuteRead(CancellationToken ct, ReadRequest request)
+    {
+        // The first attempt runs inline: only a failed one pays for the retry machinery.
+        Exception failure;
+        try
         {
-            string target = GetTargetByShard(request.Shard, hint);
-            var client = GetClientByTarget(target);
-            using var stream = client.Read(request, ct);
+            return await ReadAttempt(ct, request, null).ConfigureAwait(false);
+        }
+        catch (Exception e)
+        {
+            failure = e;
+        }
 
-            ReadResponse? response = null;
-            while (true)
+        bool first = true;
+        return await ExecuteWithRetry(ct, hint =>
+        {
+            if (first)
             {
-                var recv = await stream.RecvAsync(ct).ConfigureAwait(false);
-                if (recv is null) return response ?? new ReadResponse();
-
-                if (response is null)
-                {
-                    response = recv;
-                }
-                else
-                {
-                    response.Gets.AddRange(recv.Gets);
-                }
+                first = false;
+                ExceptionDispatchInfo.Throw(failure);
             }
-        }, IsRetryableShardRequestFunc);
+
+            return ReadAttempt(ct, request, hint);
+        }, IsRetryableShardRequestFunc).ConfigureAwait(false);
+    }
+
+    private async ValueTask<ReadResponse> ReadAttempt(CancellationToken ct, ReadRequest request, ErrorMetadata? hint)
+    {
+        string target = GetTargetByShard(request.Shard, hint);
+        var client = GetClientByTarget(target);
+        using var stream = client.Read(request, ct);
+
+        // The server sends one response per request in practice: it is returned as is, without copying its gets.
+        ReadResponse? response = null;
+        while (true)
+        {
+            var recv = await stream.RecvAsync(ct).ConfigureAwait(false);
+            if (recv is null) return response ?? new ReadResponse();
+
+            if (response is null) response = recv;
+            else response.Gets.AddRange(recv.Gets);
+        }
+    }
 
     public async ValueTask ExecuteList(CancellationToken ct, ListRequest request, Func<ListResponse, Exception?> listResponseConsumer)
     {

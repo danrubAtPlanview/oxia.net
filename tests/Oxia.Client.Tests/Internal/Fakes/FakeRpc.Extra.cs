@@ -95,13 +95,44 @@ public sealed class FakeWriteStream : IWriteStreamCall
     /// <summary>Overrides CloseSend (Go: old.stream.CloseSend()).</summary>
     public Exception? CloseSendError { get; set; }
 
-    public ValueTask SendAsync(WriteRequest request, CancellationToken ct = default)
+    /// <summary>Invoked for every request sent (after it is counted): lets a test fail the stream, respond, ...</summary>
+    public Action<FakeWriteStream, WriteRequest>? OnSend { get; set; }
+
+    /// <summary>Each SendAsync waits this long (to observe overlapping sends).</summary>
+    public TimeSpan SendDelay { get; set; }
+
+    /// <summary>SendAsync blocks until its token is cancelled (a send stuck on connecting or on flow control).</summary>
+    public bool BlockSends { get; set; }
+
+    /// <summary>The largest number of SendAsync calls that were running at the same time.</summary>
+    public int MaxConcurrentSends => Volatile.Read(ref _maxConcurrent);
+
+    private int _concurrent;
+    private int _maxConcurrent;
+
+    public async ValueTask SendAsync(WriteRequest request, CancellationToken ct = default)
     {
-        if (SendError is { } err) return ValueTask.FromException(err);
-        Interlocked.Increment(ref _sent);
-        lock (Requests) Requests.Add(request);
-        if (AutoRespond) _responses.Writer.TryWrite(new WriteResponse());
-        return ValueTask.CompletedTask;
+        int now = Interlocked.Increment(ref _concurrent);
+        int max;
+        while (now > (max = Volatile.Read(ref _maxConcurrent)))
+        {
+            if (Interlocked.CompareExchange(ref _maxConcurrent, now, max) == max) break;
+        }
+
+        try
+        {
+            if (BlockSends) await Task.Delay(Timeout.Infinite, ct).ConfigureAwait(false);
+            if (SendDelay > TimeSpan.Zero) await Task.Delay(SendDelay, ct).ConfigureAwait(false);
+            if (SendError is { } err) throw err;
+            Interlocked.Increment(ref _sent);
+            lock (Requests) Requests.Add(request);
+            if (AutoRespond) _responses.Writer.TryWrite(new WriteResponse());
+            OnSend?.Invoke(this, request);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _concurrent);
+        }
     }
 
     /// <summary>Pushes a response by hand (stream that does not auto respond).</summary>
