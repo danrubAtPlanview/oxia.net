@@ -67,7 +67,6 @@ ported. Files left out, and why — check this list first when a sync diff touch
 * [F2 — clients & admin](docs/porting/F2-clients.md)
 * [T — test infrastructure & integration tests](docs/porting/T-integration.md)
 * [T2 — security (TLS/OIDC) integration tests](docs/porting/T2-security.md)
-* [Z1 — end-to-end allocation elimination](docs/porting/Z1-allocation.md)
 * [Z2 — throughput & latency](docs/porting/Z2-throughput.md)
 * [Z1 — end-to-end allocation elimination (wave 2)](docs/porting/Z1-allocation.md) — design, ownership protocol and measurements: [`docs/performance-allocation.md`](docs/performance-allocation.md)
 
