@@ -147,6 +147,7 @@ internal sealed class Connection : IAsyncCloser
             EnableMultipleHttp2Connections = true,
             ConnectTimeout = DefaultConnectTimeout, // grpc-go's minimum connect timeout
         };
+        TransportTuning.Apply(handler);
         if (useTls)
         {
             handler.SslOptions = tlsConf ?? new SslClientAuthenticationOptions { EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13 };

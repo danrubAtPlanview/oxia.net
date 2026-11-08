@@ -69,8 +69,9 @@ internal sealed class BatcherImpl : IBatcher
     private int _started;
     private readonly TaskCompletionSource _done = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    internal BatcherImpl(Func<IBatch> batchFactory, int queueCapacity, TimeSpan linger, int maxRequestsPerBatch)
+    internal BatcherImpl(Func<IBatch> batchFactory, int queueCapacity, TimeSpan linger, int maxRequestsPerBatch, int experimentalMaxInFlight = 1)
     {
+        ExperimentalMaxInFlight = Math.Max(1, experimentalMaxInFlight);
         _batchFactory = batchFactory;
         _maxRequestsPerBatch = maxRequestsPerBatch;
         QueueCapacity = Math.Max(1, queueCapacity);
@@ -197,7 +198,7 @@ internal sealed class BatcherImpl : IBatcher
                     long remaining = deadline - Stopwatch.GetTimestamp();
                     if (remaining <= 0)
                     {
-                        await CompleteAsync(batch).ConfigureAwait(false);
+                        await CompleteOrPipelineAsync(batch).ConfigureAwait(false);
                         batch = null;
                         continue;
                     }
@@ -215,9 +216,10 @@ internal sealed class BatcherImpl : IBatcher
                 {
                     if (batch is not null)
                     {
-                        await CompleteAsync(batch).ConfigureAwait(false);
+                        await CompleteOrPipelineAsync(batch).ConfigureAwait(false);
                         batch = null;
                     }
+                    if (_inFlight is { Count: > 0 }) await DrainInFlightAsync().ConfigureAwait(false);
                     barrier.Done();
                     continue;
                 }
@@ -229,14 +231,14 @@ internal sealed class BatcherImpl : IBatcher
 
                 if (!batch.CanAdd(call))
                 {
-                    await CompleteAsync(batch).ConfigureAwait(false);
+                    await CompleteOrPipelineAsync(batch).ConfigureAwait(false);
                     batch = NewBatch(out deadline);
                 }
 
                 batch.Add(call);
                 if (batch.Size == _maxRequestsPerBatch || _lingerTicks == 0)
                 {
-                    await CompleteAsync(batch).ConfigureAwait(false);
+                    await CompleteOrPipelineAsync(batch).ConfigureAwait(false);
                     batch = null;
                 }
             }
@@ -248,6 +250,7 @@ internal sealed class BatcherImpl : IBatcher
         }
 
         // Closed.
+        if (_inFlight is { Count: > 0 }) await DrainInFlightAsync().ConfigureAwait(false);
         if (batch is not null)
         {
             try
@@ -280,6 +283,36 @@ internal sealed class BatcherImpl : IBatcher
         var batch = _batchFactory();
         deadline = _lingerTicks > 0 ? Stopwatch.GetTimestamp() + _lingerTicks : 0;
         return batch;
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // EXPERIMENT -- pipelining (NOT a feature: see docs/performance.md, "proposal: pipelined write batches")
+    // -----------------------------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// UNSAFE MEASUREMENT SWITCH, default 1 = the contract (one batch in flight per shard).  With K &gt; 1 the loop starts the next batch
+    /// while up to K-1 earlier ones wait for their responses.  It keeps the order in which batches are SENT but has no ordered retry: a failed
+    /// batch is retried independently of the ones behind it, which can reorder writes to a key.  It exists to quantify the potential of
+    /// pipelining (benchmarks only); nothing in the library sets it.
+    /// </summary>
+    internal int ExperimentalMaxInFlight { get; }
+
+    private Queue<Task>? _inFlight;
+
+    private ValueTask CompleteOrPipelineAsync(IBatch batch) =>
+        ExperimentalMaxInFlight <= 1 ? CompleteAsync(batch) : PipelineAsync(batch);
+
+    private async ValueTask PipelineAsync(IBatch batch)
+    {
+        var inFlight = _inFlight ??= new Queue<Task>();
+        while (inFlight.Count > 0 && inFlight.Peek().IsCompleted) _ = inFlight.Dequeue();
+        while (inFlight.Count >= ExperimentalMaxInFlight) await inFlight.Dequeue().ConfigureAwait(false);
+        inFlight.Enqueue(CompleteAsync(batch).AsTask());
+    }
+
+    private async ValueTask DrainInFlightAsync()
+    {
+        while (_inFlight is { Count: > 0 } inFlight) await inFlight.Dequeue().ConfigureAwait(false);
     }
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
