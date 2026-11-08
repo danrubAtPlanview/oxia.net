@@ -37,6 +37,18 @@ public interface IExecutor
     ValueTask ExecuteRangeScan(CancellationToken ct, RangeScanRequest request, Func<RangeScanResponse, Exception?> rangeScanResponseConsumer);
 }
 
+/// <summary>
+/// PROTOTYPE (R3): an executor whose stream consumers may AWAIT.  The next message of the gRPC stream is read only after the
+/// consumer returned, so a consumer that waits for room in a bounded channel back-pressures the server through HTTP/2 flow
+/// control, exactly like Go's consumer that blocks on `ch &lt;- result` inside the goroutine that calls Recv().
+/// </summary>
+public interface IStreamingExecutor : IExecutor
+{
+    ValueTask ExecuteList(CancellationToken ct, ListRequest request, Func<ListResponse, ValueTask<Exception?>> listResponseConsumer);
+
+    ValueTask ExecuteRangeScan(CancellationToken ct, RangeScanRequest request, Func<RangeScanResponse, ValueTask<Exception?>> rangeScanResponseConsumer);
+}
+
 /// <summary>Go: internal.RpcProvider.</summary>
 public interface IRpcProvider : IExecutor, IAsyncCloser
 {

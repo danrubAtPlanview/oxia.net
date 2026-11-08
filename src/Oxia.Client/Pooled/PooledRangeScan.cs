@@ -16,11 +16,14 @@
 //                queued or has ended, then takes the lowest by KeyOrder.CompareUtf8 -- a k-way merge by linear scan (k = number of shards),
 //                not a heap, because k is small and a scan over 1 shard (the usual test) needs no comparison at all;
 //              * WaitToReadAsync parks on one reusable ManualResetValueTaskSourceCore signalled by the producers.
-//   Divergences: the streams are read eagerly (no back-pressure to gRPC), like RangeScanAsync.  Tasks are Task.Run'd directly (they are
-//              not counted in AsyncClientImpl.RunningStreamTasks).  The reader is single-consumer.
+//   Back-pressure: with a streaming executor (the real RpcProvider) a shard's scan waits when its queue holds MaxQueuedPerShard records
+//              and resumes when the consumer drained half of them, so a slow consumer slows the server's stream down (gRPC flow control)
+//              instead of buffering the whole scan; with an executor that cannot await (fakes) the stream is read eagerly.
+//   Divergences: Tasks are Task.Run'd directly (they are not counted in AsyncClientImpl.RunningStreamTasks).  The reader is single-consumer.
 // =====================================================================================================================
 using System.Threading.Channels;
 using System.Threading.Tasks.Sources;
+using Oxia.Client.Internal;
 using Oxia.Client.Internal.Model;
 using Oxia.Common.Proto;
 
@@ -38,6 +41,10 @@ internal sealed class PooledScanReader : ChannelReader<PooledGetResult>, IValueT
     private readonly KeyOrder _order;
     private readonly CancellationTokenSource _scanCts;
 
+    /// <summary>Records a shard's queue may hold before the shard's scan waits for the consumer.</summary>
+    internal const int MaxQueuedPerShard = 1024;
+
+    private readonly TaskCompletionSource?[] _roomWaiters;
     private ManualResetValueTaskSourceCore<bool> _waiter = new() { RunContinuationsAsynchronously = true };
     private CancellationTokenRegistration _waitRegistration;
     private bool _waiting;
@@ -51,6 +58,7 @@ internal sealed class PooledScanReader : ChannelReader<PooledGetResult>, IValueT
         _queues = new Queue<PooledGetResult>[shards];
         for (int i = 0; i < shards; i++) _queues[i] = QueuePool.TryPop() ?? new Queue<PooledGetResult>();
         _ended = new bool[shards];
+        _roomWaiters = new TaskCompletionSource?[shards];
         _order = order;
         _scanCts = scanCts;
         if (shards == 0) _finished = true;
@@ -72,6 +80,19 @@ internal sealed class PooledScanReader : ChannelReader<PooledGetResult>, IValueT
             Signal();
         }
         StopProducersIfOver();
+    }
+
+    /// <summary>
+    /// A task that completes when the queue of the shard has room again (the consumer drained it), or null if it has room now.  The
+    /// producer awaits it after adding a record: the queue never grows beyond MaxQueuedPerShard plus the records of one message.
+    /// </summary>
+    public Task? WaitForRoom(int shard)
+    {
+        lock (_gate)
+        {
+            if (_finished || _queues[shard].Count < MaxQueuedPerShard) return null;
+            return (_roomWaiters[shard] ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+        }
     }
 
     public void End(int shard)
@@ -192,7 +213,13 @@ internal sealed class PooledScanReader : ChannelReader<PooledGetResult>, IValueT
 
         if (!dequeue) return Readiness.Ready;
 
-        _queues[best].Dequeue();
+        var chosen = _queues[best];
+        chosen.Dequeue();
+        if (_roomWaiters[best] is { } waiter && chosen.Count <= MaxQueuedPerShard / 2)
+        {
+            _roomWaiters[best] = null;
+            waiter.TrySetResult(); // asynchronous continuations: safe under the lock
+        }
         result = bestItem;
         if (result.Err is not null) Finish();
         return Readiness.Ready;
@@ -213,6 +240,11 @@ internal sealed class PooledScanReader : ChannelReader<PooledGetResult>, IValueT
     private void Finish()
     {
         _finished = true;
+        for (int i = 0; i < _roomWaiters.Length; i++)
+        {
+            _roomWaiters[i]?.TrySetResult(); // nobody will read more: let the producers go (they find the reader finished)
+            _roomWaiters[i] = null;
+        }
         foreach (var queue in _queues)
         {
             while (queue.TryDequeue(out var item)) item.Dispose();
@@ -311,7 +343,8 @@ internal static class PooledRangeScan
             Exception? err = null;
             try
             {
-                await client.Executor.ExecuteRangeScan(retryCts.Token, request, response =>
+                var streaming = client.Executor as IStreamingExecutor;
+                async ValueTask<Exception?> Consume(RangeScanResponse response)
                 {
                     if (request.EndInclusive && !response.EndInclusive)
                     {
@@ -323,8 +356,20 @@ internal static class PooledRangeScan
                     {
                         reader.Add(index, ToItem(records[i], opts.IncludeValue));
                     }
+                    // back-pressure: the next message of the stream is received only when the consumer made room
+                    if (streaming is not null && reader.WaitForRoom(index) is { } room) await room.WaitAsync(retryCts.Token).ConfigureAwait(false);
                     return null;
-                }).ConfigureAwait(false);
+                }
+
+                if (streaming is not null)
+                {
+                    await streaming.ExecuteRangeScan(retryCts.Token, request, Consume).ConfigureAwait(false);
+                }
+                else
+                {
+                    // an executor that cannot await: Consume never waits (it completes synchronously)
+                    await client.Executor.ExecuteRangeScan(retryCts.Token, request, response => Consume(response).Result).ConfigureAwait(false);
+                }
             }
             catch (Exception e)
             {
