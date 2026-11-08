@@ -473,7 +473,11 @@ public class AsyncClientImplTests
         var (client, batchers) = NewWriteTestClient(shardManager);
         using var expired = F2Util.Expired();
         client.Sessions = new Sessions(expired.Token, shardManager, new SessionsTestRpcProvider(),
-            new ClientOptions { RequestTimeout = TimeSpan.FromSeconds(1) });
+            new ClientOptions { RequestTimeout = TimeSpan.FromSeconds(1) })
+        {
+            // An expired context.Context: context.DeadlineExceeded (a token cannot tell it from a cancellation)
+            ContextError = new TimeoutException("context deadline exceeded"),
+        };
 
         var result = await client.PutAsync("a", V, OxiaOptions.Ephemeral());
         Assert.True(OxiaErrors.IsDeadlineExceeded(result.Err));

@@ -26,7 +26,6 @@
 //      * The factory resolves the dial options of a resolver through GrpcResolverBuilder.AsDialOption.
 // =====================================================================================================================
 using System.Threading.Channels;
-using Oxia.Client.Batch;
 using Oxia.Client.Internal;
 using Oxia.Client.Internal.Batch;
 using Oxia.Client.Internal.Model;
