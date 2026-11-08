@@ -38,7 +38,6 @@
 // =====================================================================================================================
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Oxia.Common.Logging;
 
@@ -54,13 +53,8 @@ internal interface IRecyclableBatch
 /// <summary>Go: batcherImpl.</summary>
 internal sealed class BatcherImpl : IBatcher
 {
-    /// <summary>Written to the queue by the linger timer to wake up an idle loop.</summary>
-    private static readonly object TimerTick = new();
-
     private readonly Func<IBatch> _batchFactory;
-    private readonly Channel<object> _callC;
-    private readonly ChannelReader<object> _reader;
-    private readonly ChannelWriter<object> _writer;
+    private readonly BatcherQueue _queue;
     private readonly long _lingerTicks;
     private readonly int _maxRequestsPerBatch;
     private readonly LingerTimer? _timer;
@@ -80,16 +74,8 @@ internal sealed class BatcherImpl : IBatcher
         _batchFactory = batchFactory;
         _maxRequestsPerBatch = maxRequestsPerBatch;
         QueueCapacity = Math.Max(1, queueCapacity);
-        _callC = Channel.CreateBounded<object>(new BoundedChannelOptions(QueueCapacity)
-        {
-            FullMode = BoundedChannelFullMode.Wait,
-            SingleReader = true,
-            SingleWriter = false,
-            AllowSynchronousContinuations = false,
-        });
-        _reader = _callC.Reader;
-        _writer = _callC.Writer;
         _log = OxiaLog.Create("batcher");
+        _queue = new BatcherQueue(QueueCapacity, FailClosed);
 
         if (linger > TimeSpan.Zero)
         {
@@ -99,7 +85,7 @@ internal sealed class BatcherImpl : IBatcher
     }
 
     /// <summary>Go: len(callC) -- the calls waiting in the queue (tests).</summary>
-    internal int QueueCount => _reader.Count;
+    internal int QueueCount => _queue.Count;
 
     /// <summary>Go: cap(callC) (tests).</summary>
     internal int QueueCapacity { get; }
@@ -111,31 +97,23 @@ internal sealed class BatcherImpl : IBatcher
     /// <summary>Go: Add.  Completes when the call is queued (or failed because the batcher is closed).</summary>
     public ValueTask AddAsync(object call)
     {
-        if (_writer.TryWrite(call)) return default;
-
-        if (Volatile.Read(ref _closing) != 0)
+        switch (_queue.TryAdd(call, out var parked))
         {
-            // Closed: no exception on this path
-            FailCall(call, ClientErrors.ShuttingDown);
-            return default;
+            case AddStatus.Queued:
+                return default;
+            case AddStatus.Closed:
+                // Closed: no exception on this path
+                FailCall(call, ClientErrors.ShuttingDown);
+                return default;
+            default:
+                // The queue is full: the producer is parked, in FIFO order, until there is room (Go: the blocking send).  Close fails
+                // its call (FailClosed) and completes the wait.
+                return parked!.AsValueTask();
         }
-        return AddSlowAsync(call);
     }
 
-    /// <summary>The queue is full (or being closed): park, in FIFO order, until there is room (Go: the blocking send).</summary>
-    private async ValueTask AddSlowAsync(object call)
-    {
-        try
-        {
-            await _writer.WriteAsync(call).ConfigureAwait(false);
-            return;
-        }
-        catch (ChannelClosedException)
-        {
-            // Close wakes up the calls being added to a full queue
-        }
-        FailCall(call, ClientErrors.ShuttingDown);
-    }
+    /// <summary>Close failed a producer parked on the full queue: its call fails like any call added to a closed batcher.</summary>
+    private void FailClosed(object call) => FailCall(call, ClientErrors.ShuttingDown);
 
     /// <summary>Go: failCall.</summary>
     private void FailCall(object call, Exception err)
@@ -160,7 +138,7 @@ internal sealed class BatcherImpl : IBatcher
     public void Dispose()
     {
         // Atomically stops new calls and wakes up (fails) the producers parked on a full queue and the idle loop.
-        _writer.TryComplete();
+        _queue.Complete();
         // Only now the loop may drain: nothing can be enqueued anymore.
         Volatile.Write(ref _closing, 1);
     }
@@ -205,13 +183,13 @@ internal sealed class BatcherImpl : IBatcher
     {
         IBatch? batch = null;
         long deadline = 0; // Stopwatch timestamp at which the open batch must be completed (linger > 0)
-        var reader = _reader;
+        var queue = _queue;
 
         while (true)
         {
             if (Volatile.Read(ref _closing) != 0) break;
 
-            if (!reader.TryRead(out var call))
+            if (!queue.TryDequeue(out var call))
             {
                 // Idle
                 if (batch is not null)
@@ -226,17 +204,8 @@ internal sealed class BatcherImpl : IBatcher
                     ArmTimer(deadline);
                 }
 
-                if (!await reader.WaitToReadAsync().ConfigureAwait(false)) break; // closed and empty
-                continue;
-            }
-
-            if (ReferenceEquals(call, TimerTick))
-            {
-                if (batch is not null && Stopwatch.GetTimestamp() >= deadline)
-                {
-                    await CompleteAsync(batch).ConfigureAwait(false);
-                    batch = null;
-                }
+                // A wake-up without a call (the linger timer, or a close) comes back through here: the checks above are the tick handler.
+                if (!await queue.WaitToReadAsync().ConfigureAwait(false)) break; // closed and empty
                 continue;
             }
 
@@ -293,9 +262,8 @@ internal sealed class BatcherImpl : IBatcher
         }
 
         // Drain the queue: no call can be added to it anymore
-        while (reader.TryRead(out var call))
+        while (queue.DequeueClosed() is { } call)
         {
-            if (ReferenceEquals(call, TimerTick)) continue;
             try
             {
                 FailCall(call, ClientErrors.ShuttingDown);
@@ -356,7 +324,6 @@ internal sealed class BatcherImpl : IBatcher
     private void OnTimer()
     {
         Volatile.Write(ref _timerPending, 0);
-        // Dropped when the queue is full (the loop is busy then) or closed
-        _writer.TryWrite(TimerTick);
+        _queue.Tick();
     }
 }

@@ -330,6 +330,14 @@ internal sealed class WriteGate
                 EndAdd();
                 return default;
             }
+            if (Batcher is BatcherImpl)
+            {
+                // The batcher's queue is FIFO and a producer parked on a full queue has already taken its place in line: a Barrier queued
+                // after this point (retire) goes behind it.  So the "read lock" need not be held until the call is really in the queue --
+                // that would cost an async state machine per parked write (not poolable at thousands of parked writes).
+                EndAdd();
+                return t;
+            }
             return AwaitAddAsync(t);
         }
 
@@ -351,6 +359,7 @@ internal sealed class WriteGate
         return AddSlowAsync(call, prev, mine);
     }
 
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask AwaitAddAsync(ValueTask t)
     {
         try

@@ -27,6 +27,26 @@ using Oxia.Common.Proto;
 namespace Oxia.Client;
 
 /// <summary>
+/// How a completed call reaches its awaiter.  The awaiter's continuation must never run on the thread that completes the batch (the
+/// batcher loop / the stream receive loop: user code there would stall every call behind it), so the pooled calls hand THEMSELVES to
+/// the thread pool as the work item (IThreadPoolWorkItem: nothing is allocated -- ManualResetValueTaskSourceCore's
+/// RunContinuationsAsynchronously would allocate a 48 B work item per completion) and set their result there, where the core runs the
+/// continuation inline (with the execution context / synchronization context handling of the core).
+/// </summary>
+internal static class CallDispatch
+{
+    /// <summary>Experiment switch (benchmarks only): set the result, i.e. run the awaiter's continuation, inline on the completing thread.</summary>
+    internal static bool Inline;
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static void Dispatch<T>(T call) where T : class, IThreadPoolWorkItem
+    {
+        if (Inline) call.Execute();
+        else ThreadPool.UnsafeQueueUserWorkItem(call, preferLocal: true);
+    }
+}
+
+/// <summary>
 /// A bounded pool of reusable call objects.  Level 1 is a small per-thread stack: the thread that completes an operation (the
 /// awaiter's continuation recycles the call in GetResult) is almost always the one that rents the next call (its loop), so the hot
 /// path never touches shared state -- the single lock of the previous array-stack pool was the most contended point of the client
@@ -120,12 +140,57 @@ internal sealed class CallPool<T> where T : class
     }
 }
 
+/// <summary>
+/// Watches an add that did not complete synchronously (the batcher queue is full / the shard holds its writes): a failed add fails the
+/// call.  Allocation free (pooled observers, one delegate each) -- the async state machine it replaces cost ~150 B per slow add.  The
+/// call is touched only if the add FAILED, i.e. the call never reached a batch, so it cannot have been completed and recycled meanwhile.
+/// </summary>
+internal sealed class AddObserver
+{
+    private static readonly CallPool<AddObserver> Pool = new(1024);
+
+    private readonly Action _continuation;
+    private System.Runtime.CompilerServices.ValueTaskAwaiter _awaiter;
+    private object? _call;
+
+    private AddObserver() => _continuation = OnCompleted;
+
+    public static void Observe(ValueTask add, object call)
+    {
+        var observer = Pool.TryRent() ?? new AddObserver();
+        observer._call = call;
+        observer._awaiter = add.GetAwaiter();
+        if (observer._awaiter.IsCompleted) observer.OnCompleted();
+        else observer._awaiter.UnsafeOnCompleted(observer._continuation);
+    }
+
+    private void OnCompleted()
+    {
+        var call = _call!;
+        _call = null;
+        try
+        {
+            _awaiter.GetResult();
+        }
+        catch (Exception e)
+        {
+            AsyncClientImpl.FailCall(call, e);
+        }
+        finally
+        {
+            _awaiter = default;
+            Pool.Return(this);
+        }
+    }
+}
+
 /// <summary>A pooled Put: the PutCall that is the request, and the source of the ValueTask of PutResult returned to the caller.</summary>
-internal sealed class PooledPutCall : PutCall, IValueTaskSource<PutResult>
+internal sealed class PooledPutCall : PutCall, IValueTaskSource<PutResult>, IThreadPoolWorkItem
 {
     private static readonly CallPool<PooledPutCall> Pool = new(4096);
 
-    private ManualResetValueTaskSourceCore<PutResult> _core = new() { RunContinuationsAsynchronously = true };
+    private ManualResetValueTaskSourceCore<PutResult> _core = new() { RunContinuationsAsynchronously = false }; // dispatched by Execute
+    private PutResult _result;
     private int _completed;
 
     // Ephemeral puts: set by AsyncClientImpl, invoked by Sessions.ExecuteWithSessionId (delegates are created once per pooled object)
@@ -141,9 +206,16 @@ internal sealed class PooledPutCall : PutCall, IValueTaskSource<PutResult>
     {
         if (Interlocked.Exchange(ref _completed, 1) != 0) return;
         base.Complete(response, error); // a decorator may have wrapped Callback
-        PutResult result = error is not null
+        _result = error is not null
             ? new PutResult("", default, error)
             : ProtoUtils.ToPutResult(Key, response!);
+        CallDispatch.Dispatch(this);
+    }
+
+    void IThreadPoolWorkItem.Execute()
+    {
+        var result = _result;
+        _result = default;
         _core.SetResult(result);
     }
 
@@ -192,11 +264,12 @@ internal sealed class PooledPutCall : PutCall, IValueTaskSource<PutResult>
 }
 
 /// <summary>A pooled Delete: result is the error (null on success), like Go's error channel.</summary>
-internal sealed class PooledDeleteCall : DeleteCall, IValueTaskSource<Exception?>
+internal sealed class PooledDeleteCall : DeleteCall, IValueTaskSource<Exception?>, IThreadPoolWorkItem
 {
     private static readonly CallPool<PooledDeleteCall> Pool = new(4096);
 
-    private ManualResetValueTaskSourceCore<Exception?> _core = new() { RunContinuationsAsynchronously = true };
+    private ManualResetValueTaskSourceCore<Exception?> _core = new() { RunContinuationsAsynchronously = false }; // dispatched by Execute
+    private Exception? _result;
     private int _completed;
 
     public static PooledDeleteCall Rent() => Pool.TryRent() ?? new PooledDeleteCall();
@@ -207,7 +280,15 @@ internal sealed class PooledDeleteCall : DeleteCall, IValueTaskSource<Exception?
     {
         if (Interlocked.Exchange(ref _completed, 1) != 0) return;
         base.Complete(response, error);
-        _core.SetResult(error ?? ProtoUtils.ToDeleteResult(response!));
+        _result = error ?? ProtoUtils.ToDeleteResult(response!);
+        CallDispatch.Dispatch(this);
+    }
+
+    void IThreadPoolWorkItem.Execute()
+    {
+        var result = _result;
+        _result = null;
+        _core.SetResult(result);
     }
 
     Exception? IValueTaskSource<Exception?>.GetResult(short token)
@@ -232,11 +313,12 @@ internal sealed class PooledDeleteCall : DeleteCall, IValueTaskSource<Exception?
 }
 
 /// <summary>A pooled single-shard Get.</summary>
-internal sealed class PooledGetCall : GetCall, IValueTaskSource<GetResult>
+internal sealed class PooledGetCall : GetCall, IValueTaskSource<GetResult>, IThreadPoolWorkItem
 {
     private static readonly CallPool<PooledGetCall> Pool = new(4096);
 
-    private ManualResetValueTaskSourceCore<GetResult> _core = new() { RunContinuationsAsynchronously = true };
+    private ManualResetValueTaskSourceCore<GetResult> _core = new() { RunContinuationsAsynchronously = false }; // dispatched by Execute
+    private GetResult _result;
     private int _completed;
 
     public static PooledGetCall Rent() => Pool.TryRent() ?? new PooledGetCall();
@@ -247,7 +329,15 @@ internal sealed class PooledGetCall : GetCall, IValueTaskSource<GetResult>
     {
         if (Interlocked.Exchange(ref _completed, 1) != 0) return;
         base.Complete(response, error);
-        _core.SetResult(ProtoUtils.ToGetResult(response, Key, error));
+        _result = ProtoUtils.ToGetResult(response, Key, error);
+        CallDispatch.Dispatch(this);
+    }
+
+    void IThreadPoolWorkItem.Execute()
+    {
+        var result = _result;
+        _result = default;
+        _core.SetResult(result);
     }
 
     GetResult IValueTaskSource<GetResult>.GetResult(short token)

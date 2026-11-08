@@ -290,7 +290,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
         {
             long shardId = ShardManager.Get(get.PartitionKeyOrKey());
             var add = ReadBatchManager.Get(shardId).AddAsync(get);
-            if (!add.IsCompletedSuccessfully) _ = ObserveAddAsync(add, get);
+            if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, get);
         }
     }
 
@@ -300,19 +300,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
     internal void AddToWriteManager(long shardId, object call)
     {
         var add = WriteBatchManager.AddAsync(shardId, call);
-        if (!add.IsCompletedSuccessfully) _ = ObserveAddAsync(add, call);
-    }
-
-    private static async Task ObserveAddAsync(ValueTask add, object call)
-    {
-        try
-        {
-            await add.ConfigureAwait(false);
-        }
-        catch (Exception e)
-        {
-            FailCall(call, e);
-        }
+        if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, call);
     }
 
     /// <summary>Go: `call.Callback(nil, err)` for any kind of call.</summary>
@@ -449,21 +437,8 @@ internal sealed class AsyncClientImpl : IAsyncClient
         }
 
         var add = WriteBatchManager.AddAsync(GetShardForKey(key, opts.PartitionKey), call);
-        if (add.IsCompletedSuccessfully) return result;
-        return PutAfterAddAsync(add, call, result);
-    }
-
-    private static async ValueTask<PutResult> PutAfterAddAsync(ValueTask add, PooledPutCall call, ValueTask<PutResult> result)
-    {
-        try
-        {
-            await add.ConfigureAwait(false);
-        }
-        catch (Exception e)
-        {
-            call.Complete(null, e);
-        }
-        return await result.ConfigureAwait(false);
+        if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, call);
+        return result;
     }
 
     public ValueTask<Exception?> DeleteAsync(string key, params ReadOnlySpan<DeleteOption> options)
@@ -480,21 +455,8 @@ internal sealed class AsyncClientImpl : IAsyncClient
         var result = call.AsValueTask();
 
         var add = WriteBatchManager.AddAsync(GetShardForKey(key, opts.PartitionKey), call);
-        if (add.IsCompletedSuccessfully) return result;
-        return DeleteAfterAddAsync(add, call, result);
-    }
-
-    private static async ValueTask<Exception?> DeleteAfterAddAsync(ValueTask add, PooledDeleteCall call, ValueTask<Exception?> result)
-    {
-        try
-        {
-            await add.ConfigureAwait(false);
-        }
-        catch (Exception e)
-        {
-            call.Complete(null, e);
-        }
-        return await result.ConfigureAwait(false);
+        if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, call);
+        return result;
     }
 
     public ValueTask<Exception?> DeleteRangeAsync(string minKeyInclusive, string maxKeyExclusive, params ReadOnlySpan<DeleteRangeOption> options)
@@ -586,21 +548,8 @@ internal sealed class AsyncClientImpl : IAsyncClient
         var result = call.AsValueTask();
 
         var add = ReadBatchManager.Get(GetShardForKey(key, opts.PartitionKey)).AddAsync(call);
-        if (add.IsCompletedSuccessfully) return result;
-        return GetAfterAddAsync(add, call, result);
-    }
-
-    private static async ValueTask<GetResult> GetAfterAddAsync(ValueTask add, PooledGetCall call, ValueTask<GetResult> result)
-    {
-        try
-        {
-            await add.ConfigureAwait(false);
-        }
-        catch (Exception e)
-        {
-            call.Complete(null, e);
-        }
-        return await result.ConfigureAwait(false);
+        if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, call);
+        return result;
     }
 
     /// <summary>Go: compareGetResponse.</summary>
@@ -675,7 +624,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
                 SecondaryIndexName = options.SecondaryIndexName,
             };
             var add = ReadBatchManager.Get(shardId).AddAsync(call);
-            if (!add.IsCompletedSuccessfully) _ = ObserveAddAsync(add, call);
+            if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, call);
         }
         return result;
     }

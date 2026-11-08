@@ -54,6 +54,9 @@ public sealed class LoadOptions
     public string? GoExe { get; set; }
     public bool GoOnly { get; set; }
 
+    /// <summary>Print the sampled allocation breakdown by type of the measured window.</summary>
+    public bool AllocProfile { get; set; }
+
     public bool Help { get; set; }
 
     public static LoadOptions Parse(string[] args)
@@ -113,6 +116,7 @@ public sealed class LoadOptions
                 case "runs": o.Runs = int.Parse(Next(), CultureInfo.InvariantCulture); break;
                 case "go": o.GoExe = Next(); break;
                 case "go-only": o.GoOnly = Flag(); break;
+                case "alloc-profile": o.AllocProfile = Flag(); break;
                 default: throw new ArgumentException($"unknown option --{name}");
             }
         }
@@ -198,6 +202,7 @@ public sealed class LoadOptions
         client     --linger 5ms  --max-requests-per-batch 1000  --max-batch-size 131072  --request-timeout 30s
                    --min-threads N     ThreadPool.SetMinThreads(N, N)
                    --tune a=b,c=d      experimental knobs (docs/performance.md)
+        diagnosis  --alloc-profile     print the allocated bytes per operation by type (sampled GC allocation ticks)
         go         --go path\to\oxia-load.exe   run the Go client on the same workload after every run (build it with Load/go/build.ps1)
                    --go-only                    run only the Go client
         """;

@@ -23,6 +23,9 @@ internal static class Tuning
                     // must be set before the first batcher with a linger exists (the service is process wide): use one run per process
                     Oxia.Client.Batch.LingerTimerService.UseHighResolutionTimer = bool.Parse(value);
                     break;
+                case "inline":
+                    Oxia.Client.CallDispatch.Inline = bool.Parse(value);
+                    break;
                 case "queue":
                     Oxia.Client.Batch.BatcherFactory.BatcherChannelBufferSize = int.Parse(value);
                     break;

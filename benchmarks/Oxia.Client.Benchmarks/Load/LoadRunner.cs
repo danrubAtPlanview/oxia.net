@@ -99,11 +99,14 @@ internal sealed class LoadRunner
         }
 
         // ---- warm-up, window, stop ----
+        using var allocProfiler = _o.AllocProfile ? new AllocProfiler() : null;
         await Task.Delay(_o.Warmup);
         var s0 = await TakeAsync(server);
+        allocProfiler?.Start();
         Volatile.Write(ref _from, s0.Timestamp);
         await Task.Delay(_o.Duration);
         Volatile.Write(ref _to, Stopwatch.GetTimestamp());
+        allocProfiler?.Stop();
         var s1 = await TakeAsync(server);
         Volatile.Write(ref _stop, 1);
 
@@ -124,7 +127,9 @@ internal sealed class LoadRunner
         if (asyncClient is not null) await asyncClient.CloseAsync();
         if (syncClient is not null) await syncClient.CloseAsync();
 
-        return BuildResult(hist, errorsTotal, s0, s1);
+        var result = BuildResult(hist, errorsTotal, s0, s1);
+        allocProfiler?.Print(Console.Out, hist[0].Count + hist[1].Count + hist[2].Count);
+        return result;
     }
 
     private LoadResult BuildResult(LatencyHistogram[] hist, long errors, Snapshot s0, Snapshot s1)
