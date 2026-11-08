@@ -44,6 +44,8 @@ internal sealed class RecordsClient : ISyncClient
     public Func<Task>? AfterNextRead { get; set; }
     public Exception? GetErr { get; set; }
     public Exception? PutErr { get; set; }
+    /// <summary>Extra hook (not in Go) for the extra tests: decides the failure of each Put (null: succeeds); runs before PutErr.</summary>
+    public Func<string, Exception?>? PutHook { get; set; }
 
     public ValueTask CloseAsync() => ValueTask.CompletedTask;
 
@@ -52,6 +54,9 @@ internal sealed class RecordsClient : ISyncClient
     {
         lock (_lock)
         {
+            var hookErr = PutHook?.Invoke(key);
+            if (hookErr is not null)
+                return ValueTask.FromException<(string, RecordVersion)>(OxiaErrors.ToThrowable(hookErr));
             if (PutErr is not null)
                 return ValueTask.FromException<(string, RecordVersion)>(OxiaErrors.ToThrowable(PutErr));
             Records[key] = value.ToArray();

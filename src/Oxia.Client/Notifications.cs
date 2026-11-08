@@ -110,10 +110,11 @@ internal sealed class NotificationsImpl : INotifications
         Exception? err = await nm.InitWaitGroup.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
         if (err is not null)
         {
-            // Stop the per-shard managers that may still be retrying
-            nm.Cancel();
+            // The wait ended because the request timeout elapsed (context.DeadlineExceeded), not because the client was closed
             if (err is OperationCanceledException && timeoutCts.IsCancellationRequested && !nm.Ctx.IsCancellationRequested)
                 err = new TimeoutException("context deadline exceeded");
+            // Stop the per-shard managers that may still be retrying
+            nm.Cancel();
             throw OxiaErrors.ToThrowable(err);
         }
 
