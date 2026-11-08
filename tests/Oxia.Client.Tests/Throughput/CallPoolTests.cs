@@ -117,8 +117,10 @@ public class CallPoolTests
             var completer = new Thread(() =>
             {
                 completerThread = Environment.CurrentManagedThreadId;
+                // Exactly one Complete here: a second one racing the awaiter would land on the call AFTER the awaiter consumed the
+                // result and recycled it (legitimately a fresh completion of the recycled instance). The double-completion guard is
+                // tested deterministically in APooledPut_ASecondComplete_BeforeTheResultIsConsumed_IsIgnored.
                 call.Complete(new PutResponse { Status = Status.Ok, Version = new ProtoVersion { VersionId = 7 } }, null);
-                call.Complete(null, new InvalidOperationException("a second Complete must be ignored"));
             });
             completer.Start();
             completer.Join();
@@ -126,6 +128,22 @@ public class CallPoolTests
             Assert.Null(result.Err);
             Assert.Equal(7, result.Version.VersionId);
             Assert.NotEqual(completerThread, awaiterThread); // never inline on the completing thread
+        }
+    }
+
+    [Fact]
+    public async Task APooledPut_ASecondComplete_BeforeTheResultIsConsumed_IsIgnored()
+    {
+        for (int round = 0; round < 200; round++)
+        {
+            var call = PooledPutCall.Rent();
+            call.Key = "k";
+            var task = call.AsValueTask();   // nobody awaits yet: the result cannot be consumed (and the call recycled) between the Completes
+            call.Complete(new PutResponse { Status = Status.Ok, Version = new ProtoVersion { VersionId = 7 } }, null);
+            call.Complete(null, new InvalidOperationException("a second Complete must be ignored"));
+            var result = await task;
+            Assert.Null(result.Err);
+            Assert.Equal(7, result.Version.VersionId);
         }
     }
 

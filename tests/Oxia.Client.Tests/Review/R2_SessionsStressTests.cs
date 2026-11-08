@@ -19,6 +19,9 @@ using Xunit;
 
 namespace Oxia.Client.Tests.Review;
 
+// Time-boxed property test: its "the scenario was exercised" guard (>= 15 rounds in the window) is a measure of CPU the test gets, so it
+// must not compete with the rest of the suite.  Run it in the non-parallel collection (assertions unchanged).
+[Collection("R1 serial")]
 public class R2_SessionsStressTests
 {
     private static readonly TimeSpan Ten = TimeSpan.FromSeconds(10);

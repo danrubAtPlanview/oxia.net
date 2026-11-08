@@ -58,6 +58,10 @@ public class R4_WriteStreamSendTests
     {
         public readonly TaskCompletionSource ReceiveLoopMayReport = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        /// <summary>Completes when the REAL call has ended on the client (its receive threw or returned null): from then on gRPC.NET
+        /// fails writes. Lets a test wait for that fact instead of sleeping and hoping (the sleep flaked under load).</summary>
+        public readonly TaskCompletionSource InnerReceiveFinished = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public CancellationToken Context => inner.Context;
         public ValueTask SendAsync(WriteRequest request, CancellationToken ct = default) => inner.SendAsync(request, ct);
         public ValueTask CloseSendAsync() => inner.CloseSendAsync();
@@ -67,10 +71,13 @@ public class R4_WriteStreamSendTests
         {
             try
             {
-                return await inner.RecvAsync(ct);
+                var response = await inner.RecvAsync(ct);
+                if (response is null) InnerReceiveFinished.TrySetResult();
+                return response;
             }
             catch
             {
+                InnerReceiveFinished.TrySetResult();
                 await ReceiveLoopMayReport.Task;
                 throw;
             }
@@ -96,7 +103,7 @@ public class R4_WriteStreamSendTests
 
         // the server ends the stream (Internal) after the first request; the receive loop is held back
         var first = wrapper.Send(default, () => Req("fail-other")).AsTask();
-        await Task.Delay(500);   // the call is over on the wire, the wrapper does not know yet
+        await stream.InnerReceiveFinished.Task.WaitAsync(TimeSpan.FromSeconds(30));   // the call is over on the wire, the wrapper does not know yet
 
         var second = await Assert.ThrowsAnyAsync<Exception>(() => wrapper.Send(default, () => Req("k")).AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
         try
