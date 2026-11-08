@@ -193,8 +193,10 @@ public class AsyncClientImplExtraTests
         var client = NewAnsweringClient(inline: true);
         var value = V;
 
-        // Warm up: pools, and the tiered JIT (unoptimised code allocates things the optimised one does not)
-        for (int round = 0; round < 4; round++)
+        // The tiered JIT needs a few rounds (with pauses: its call counting starts after a quiet period) before the hot
+        // methods are optimised; unoptimised code allocates things the optimised one does not. Take the best of the rounds.
+        long putBytes = long.MaxValue, getBytes = long.MaxValue, deleteBytes = long.MaxValue;
+        for (int round = 0; round < 12; round++)
         {
             for (int i = 0; i < 20_000; i++)
             {
@@ -203,35 +205,25 @@ public class AsyncClientImplExtraTests
                 await client.DeleteAsync("key");
             }
             await Task.Delay(250);
+
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < 1_000; i++) await client.PutAsync("key", value);
+            putBytes = Math.Min(putBytes, (GC.GetAllocatedBytesForCurrentThread() - before) / 1000);
+
+            before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < 1_000; i++) await client.GetAsync("key");
+            getBytes = Math.Min(getBytes, (GC.GetAllocatedBytesForCurrentThread() - before) / 1000);
+
+            before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < 1_000; i++) await client.DeleteAsync("key");
+            deleteBytes = Math.Min(deleteBytes, (GC.GetAllocatedBytesForCurrentThread() - before) / 1000);
         }
 
-        // The answering batcher itself allocates the response objects of the fake server: measure those and subtract
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 1_000; i++)
-        {
-            await client.PutAsync("key", value);
-        }
-        long putBytes = GC.GetAllocatedBytesForCurrentThread() - before;
-
-        before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 1_000; i++)
-        {
-            await client.GetAsync("key");
-        }
-        long getBytes = GC.GetAllocatedBytesForCurrentThread() - before;
-
-        before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 1_000; i++)
-        {
-            await client.DeleteAsync("key");
-        }
-        long deleteBytes = GC.GetAllocatedBytesForCurrentThread() - before;
-
-        // fake server per op: PutResponse (48) + ProtoVersion (64) ; GetResponse (56) + ProtoVersion (64) + byte[1] (32) ; Delete: 0
-        // -> the client adds nothing: allow the fake's allocations (<= 160 B per op) and no more
-        Assert.True(putBytes / 1000 <= 160, $"PutAsync allocated {putBytes / 1000} B/op");
-        Assert.True(getBytes / 1000 <= 232, $"GetAsync allocated {getBytes / 1000} B/op");
-        Assert.True(deleteBytes / 1000 <= 8, $"DeleteAsync allocated {deleteBytes / 1000} B/op");
+        // The answering batcher itself allocates the response objects of the fake server (put: PutResponse + ProtoVersion,
+        // 112-128 B; get: GetResponse + ProtoVersion + byte[1], 176 B; delete: nothing): the client adds nothing to that
+        Assert.True(putBytes <= 128, $"PutAsync allocated {putBytes} B/op");
+        Assert.True(getBytes <= 176, $"GetAsync allocated {getBytes} B/op");
+        Assert.True(deleteBytes <= 0, $"DeleteAsync allocated {deleteBytes} B/op");
     }
 
     [Fact]
