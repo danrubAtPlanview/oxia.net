@@ -13,6 +13,10 @@
 //   Divergences: The Go tests read the leader from the coordinator's in-process metadata (`mock.StatusSnapshot`); here it is read
 //              from the shard assignments any live data server streams (the same `Leader` the clients get).  The coordinator uses
 //              the `file` metadata provider on the container tmpfs instead of the in-memory one.
+//              Wave 2 (T2, security tests): StartAsync takes an optional OxiaClusterProfile (extra `oxia server` / `oxia coordinator` flags
+//              and files written to /data/cluster<slot>/files, e.g. TLS certificates and OIDC key files); a cluster started with a profile is
+//              NOT opt-in (OXIA_TEST_CLUSTER), because `oxia standalone` has no TLS / auth flags and this is the only way to test them.
+//              GetHostAddressAsync tells how the container reaches the test host (for an OIDC provider hosted by the test process).
 // =====================================================================================================================
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -34,7 +38,8 @@ public sealed class OxiaCluster : IAsyncDisposable
     private readonly int _slot;
     private int _closed;
 
-    internal OxiaCluster(OxiaClusterFixture owner, int slot, string name, string? authority, IReadOnlyList<ClusterServer> servers, uint shards)
+    internal OxiaCluster(OxiaClusterFixture owner, int slot, string name, string? authority, IReadOnlyList<ClusterServer> servers, uint shards,
+        RawSecurity? probe = null)
     {
         _owner = owner;
         _slot = slot;
@@ -42,7 +47,11 @@ public sealed class OxiaCluster : IAsyncDisposable
         Authority = authority;
         Servers = servers;
         InitialShardCount = shards;
+        Probe = probe;
     }
+
+    /// <summary>The TLS / credentials the raw gRPC calls of the test infrastructure use against this cluster (null = plaintext, no auth).</summary>
+    public RawSecurity? Probe { get; }
 
     public string Name { get; }
 
@@ -65,7 +74,7 @@ public sealed class OxiaCluster : IAsyncDisposable
             {
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 cts.CancelAfter(TimeSpan.FromSeconds(3));
-                var (shards, _) = await RawOxia.GetAssignmentsAsync(server.Public, ct: cts.Token).ConfigureAwait(false);
+                var (shards, _) = await RawOxia.GetAssignmentsAsync(server.Public, ct: cts.Token, security: Probe).ConfigureAwait(false);
                 var leader = shards.FirstOrDefault(s => s.Shard == shard).Leader;
                 if (!string.IsNullOrEmpty(leader)) return Servers.FirstOrDefault(s => s.Public == leader);
             }
@@ -185,10 +194,12 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
     /// AllowExtraAuthorities}</c>) and waits until every shard has a leader.
     /// </summary>
     public async Task<OxiaCluster> StartAsync(string name, int serverCount, int replicationFactor, uint initialShardCount,
-        string? extraAuthority = null, CancellationToken ct = default)
+        string? extraAuthority = null, CancellationToken ct = default, OxiaClusterProfile? profile = null)
     {
         if (serverCount is < 1 or > MaxServers) throw new ArgumentOutOfRangeException(nameof(serverCount));
-        if (!IntegrationEnv.ClusterEnabled) Assert.Skip($"cluster tests are opt-in: set {IntegrationEnv.ClusterVar}=1");
+        // the security tests (profile != null) are the only way to run TLS / OIDC against a real server (`oxia standalone` has no such
+        // flags), so they are not opt-in
+        if (profile is null && !IntegrationEnv.ClusterEnabled) Assert.Skip($"cluster tests are opt-in: set {IntegrationEnv.ClusterVar}=1");
         if (IntegrationEnv.ExternalAddress is not null) Assert.Skip($"cluster tests need the Docker fixture (unset {IntegrationEnv.AddressVar})");
 
         ReusableContainer container;
@@ -207,14 +218,14 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
         var slot = -1;
         try
         {
-            slot = await LockAndStartAsync(container, name, serverCount, replicationFactor, initialShardCount, extraAuthority, ct).ConfigureAwait(false);
+            slot = await LockAndStartAsync(container, name, serverCount, replicationFactor, initialShardCount, extraAuthority, ct, profile).ConfigureAwait(false);
             var servers = Enumerable.Range(0, serverCount)
                 .Select(i => new ClusterServer($"{name}-s{i + 1}", i, $"127.0.0.1:{container.HostPorts[PublicPort(slot, i)]}", $"127.0.0.1:{InternalPort(slot, i)}"))
                 .ToList();
-            var cluster = new OxiaCluster(this, slot, name, extraAuthority, servers, initialShardCount);
+            var cluster = new OxiaCluster(this, slot, name, extraAuthority, servers, initialShardCount, profile?.Probe);
             var healthSlot = slot;
             await OxiaReadiness.WaitUntilReadyAsync(servers[0].Public, initialShardCount, TimeSpan.FromSeconds(90), "default",
-                () => HealthCheckAsync(container, healthSlot, serverCount), () => GetClusterLogsAsync(healthSlot), ct).ConfigureAwait(false);
+                () => HealthCheckAsync(container, healthSlot, serverCount), () => GetClusterLogsAsync(healthSlot), ct, profile?.Probe).ConfigureAwait(false);
             // the first assignments can come before every shard has an elected leader: wait for shard 0's leader like the Go tests
             var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
             while (await cluster.GetLeaderAsync(0, ct).ConfigureAwait(false) is null)
@@ -236,7 +247,7 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
     }
 
     private async Task<int> LockAndStartAsync(ReusableContainer container, string name, int serverCount, int replicationFactor, uint shards,
-        string? extraAuthority, CancellationToken ct)
+        string? extraAuthority, CancellationToken ct, OxiaClusterProfile? profile = null)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromMinutes(5);
         var first = Random.Shared.Next(_clusters);
@@ -254,7 +265,7 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
                 var started = false;
                 try
                 {
-                    var script = BuildAcquireScript(container, slot, name, serverCount, replicationFactor, shards, extraAuthority);
+                    var script = BuildAcquireScript(container, slot, name, serverCount, replicationFactor, shards, extraAuthority, profile);
                     var r = await container.ExecScriptAsync(script, [], TimeSpan.FromSeconds(90), ct).ConfigureAwait(false);
                     if (r.ExitCode == 0 && r.StdOut.StartsWith("OK", StringComparison.Ordinal))
                     {
@@ -286,7 +297,8 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
         }
     }
 
-    private static string BuildAcquireScript(ReusableContainer container, int c, string name, int serverCount, int rf, uint shards, string? extraAuthority)
+    private static string BuildAcquireScript(ReusableContainer container, int c, string name, int serverCount, int rf, uint shards, string? extraAuthority,
+        OxiaClusterProfile? profile = null)
     {
         var yaml = new StringBuilder();
         yaml.Append("namespaces:\n  - name: default\n");
@@ -306,20 +318,105 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
         sb.Append(CultureInfo.InvariantCulture, $"echo '{ProcessOwner.Id}' > \"$lock/owner\"\n");
         sb.Append("for f in \"$base\"/*/pid; do if [ -f \"$f\" ]; then kill -9 \"$(cat \"$f\")\" 2>/dev/null; fi; done\n");
         sb.Append("rm -rf \"$base\"; mkdir -p \"$base/coord\"\n");
+        if (profile is not null) AppendProfileFiles(sb, c, profile);
         for (var s = 0; s < serverCount; s++)
         {
             sb.Append(CultureInfo.InvariantCulture, $"mkdir -p \"$base/s{s}\"\n");
-            sb.Append(CultureInfo.InvariantCulture,
-                $"nohup sh -c \"echo \\$\\$ > $base/s{s}/pid; exec oxia server -p 0.0.0.0:{PublicPort(c, s)} -i 127.0.0.1:{InternalPort(c, s)} -m 127.0.0.1:{MetricsPort(c, s)} " +
-                $"--data-dir $base/s{s}/db --wal-dir $base/s{s}/wal --wal-sync-data=false --db-cache-size-mb 8\" > \"$base/s{s}/log\" 2>&1 < /dev/null &\n");
+            if (profile is null)
+            {
+                sb.Append(CultureInfo.InvariantCulture,
+                    $"nohup sh -c \"echo \\$\\$ > $base/s{s}/pid; exec oxia server -p 0.0.0.0:{PublicPort(c, s)} -i 127.0.0.1:{InternalPort(c, s)} -m 127.0.0.1:{MetricsPort(c, s)} " +
+                    $"--data-dir $base/s{s}/db --wal-dir $base/s{s}/wal --wal-sync-data=false --db-cache-size-mb 8\" > \"$base/s{s}/log\" 2>&1 < /dev/null &\n");
+            }
+            else
+            {
+                AppendProfiledProcess(sb, c, $"s{s}",
+                    $"oxia server -p 0.0.0.0:{PublicPort(c, s)} -i 127.0.0.1:{InternalPort(c, s)} -m 127.0.0.1:{MetricsPort(c, s)} " +
+                    $"--data-dir /data/cluster{c}/s{s}/db --wal-dir /data/cluster{c}/s{s}/wal --wal-sync-data=false --db-cache-size-mb 8",
+                    profile.ServerArgs);
+            }
         }
 
         sb.Append("cat > \"$base/coord/cluster.yaml\" <<'OXIA_CLUSTER_YAML'\n").Append(yaml).Append("OXIA_CLUSTER_YAML\n");
-        sb.Append(CultureInfo.InvariantCulture,
-            $"nohup sh -c \"echo \\$\\$ > $base/coord/pid; exec oxia coordinator -i 127.0.0.1:{CoordInternalPort(c)} -p 127.0.0.1:{CoordPublicPort(c)} -m 127.0.0.1:{CoordMetricsPort(c)} ");
-        sb.Append("--metadata file --file-clusters-status-path $base/coord/status.json --cconfig $base/coord/cluster.yaml\" > \"$base/coord/log\" 2>&1 < /dev/null &\n");
+        if (profile is null)
+        {
+            sb.Append(CultureInfo.InvariantCulture,
+                $"nohup sh -c \"echo \\$\\$ > $base/coord/pid; exec oxia coordinator -i 127.0.0.1:{CoordInternalPort(c)} -p 127.0.0.1:{CoordPublicPort(c)} -m 127.0.0.1:{CoordMetricsPort(c)} ");
+            sb.Append("--metadata file --file-clusters-status-path $base/coord/status.json --cconfig $base/coord/cluster.yaml\" > \"$base/coord/log\" 2>&1 < /dev/null &\n");
+        }
+        else
+        {
+            AppendProfiledProcess(sb, c, "coord",
+                $"oxia coordinator -i 127.0.0.1:{CoordInternalPort(c)} -p 127.0.0.1:{CoordPublicPort(c)} -m 127.0.0.1:{CoordMetricsPort(c)} " +
+                $"--metadata file --file-clusters-status-path /data/cluster{c}/coord/status.json --cconfig /data/cluster{c}/coord/cluster.yaml",
+                profile.CoordinatorArgs);
+        }
+
         sb.Append("echo OK\n");
         return sb.ToString();
+    }
+
+    // ---- profile support (security tests): extra files in /data/cluster<c>/files and extra flags, via a generated run.sh ----
+
+    private static string FilesDir(int c) => $"/data/cluster{c}/files";
+
+    /// <summary>Writes the profile's files (certificates, keys, ...) into the slot's tmpfs directory with quoted here-documents.</summary>
+    private static void AppendProfileFiles(StringBuilder sb, int c, OxiaClusterProfile profile)
+    {
+        if (profile.Files.Count == 0) return;
+        sb.Append(CultureInfo.InvariantCulture, $"mkdir -p {FilesDir(c)}\n");
+        var index = 0;
+        foreach (var (fileName, content) in profile.Files)
+        {
+            if (fileName.Length == 0 || !fileName.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '.' or '-' or '_'))
+            {
+                throw new ArgumentException($"invalid profile file name '{fileName}'", nameof(profile));
+            }
+
+            var terminator = $"OXIA_FILE_{index++}";
+            if (content.Contains(terminator, StringComparison.Ordinal)) throw new ArgumentException($"profile file '{fileName}' contains '{terminator}'", nameof(profile));
+            sb.Append(CultureInfo.InvariantCulture, $"cat > {FilesDir(c)}/{fileName} <<'{terminator}'\n").Append(content.Replace("\r\n", "\n", StringComparison.Ordinal));
+            if (!content.EndsWith('\n')) sb.Append('\n');
+            sb.Append(terminator).Append('\n');
+        }
+
+        sb.Append(CultureInfo.InvariantCulture, $"chmod 600 {FilesDir(c)}/*\n");
+    }
+
+    /// <summary>
+    /// Starts <c>exec &lt;command&gt; &lt;args...&gt;</c> in the background through a generated <c>run.sh</c> (so that an argument can hold
+    /// JSON with quotes): the script records its pid (as the plain variant does: the exec'd process keeps it) and the output goes to <c>log</c>.
+    /// </summary>
+    private static void AppendProfiledProcess(StringBuilder sb, int c, string dir, string command, IReadOnlyList<string> extraArgs)
+    {
+        var run = $"/data/cluster{c}/{dir}/run.sh";
+        sb.Append(CultureInfo.InvariantCulture, $"cat > {run} <<'OXIA_RUN'\n");
+        sb.Append(CultureInfo.InvariantCulture, $"echo $$ > /data/cluster{c}/{dir}/pid\nexec {command}");
+        foreach (var arg in extraArgs)
+        {
+            sb.Append(' ').Append(ShellQuote(arg.Replace(OxiaClusterProfile.DirToken, FilesDir(c), StringComparison.Ordinal)));
+        }
+
+        sb.Append("\nOXIA_RUN\n");
+        sb.Append(CultureInfo.InvariantCulture, $"nohup sh {run} > /data/cluster{c}/{dir}/log 2>&1 < /dev/null &\n");
+    }
+
+    private static string ShellQuote(string value) => "'" + value.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
+
+    /// <summary>
+    /// The name under which processes INSIDE the cluster container reach a service listening on the machine running the tests:
+    /// <c>host.docker.internal</c> when it resolves (Docker Desktop, or a container created with <c>--add-host</c>), otherwise the
+    /// container's default gateway (the docker0 bridge on Linux; the service must then listen on all interfaces).
+    /// </summary>
+    public async Task<string> GetHostAddressAsync(CancellationToken ct = default)
+    {
+        var container = await EnsureContainerAsync(ct).ConfigureAwait(false);
+        var r = await container.ExecAsync(["sh", "-c",
+            "if getent hosts host.docker.internal >/dev/null 2>&1; then echo host.docker.internal; else ip route | awk '/^default/ {print $3; exit}'; fi"],
+            TimeSpan.FromSeconds(20), ct).ConfigureAwait(false);
+        var host = r.StdOut.Trim();
+        if (!r.Ok || host.Length == 0) throw new DockerException("could not determine how the cluster container reaches the host: " + r.Combined);
+        return host;
     }
 
     private static string BuildReleaseScript(int c) =>

@@ -132,11 +132,20 @@ public sealed class Metrics : IDisposable
     /// <summary>Records the end of an operation: the time since <paramref name="start"/> and, if known, the value size.</summary>
     private void RecordOp(string requestType, long start, Exception? err, long valueSize)
     {
-        var attrs = MetricsUtils.Attrs(requestType, err);
-        _opTime.Record(_sinceFunc(start), attrs);
-        if (valueSize >= 0)
+        // Go: OTel instruments never throw into the caller.  A MeterListener callback CAN throw out of Counter.Add;
+        // letting that escape would fail operations the server applied and re-complete recycled pooled calls (review R1-2).
+        try
         {
-            _opValue.Record(valueSize, attrs);
+            var attrs = MetricsUtils.Attrs(requestType, err);
+            _opTime.Record(_sinceFunc(start), attrs);
+            if (valueSize >= 0)
+            {
+                _opValue.Record(valueSize, attrs);
+            }
+        }
+        catch (Exception)
+        {
+            // observer failures are not the operation's failures
         }
     }
 
@@ -254,22 +263,34 @@ public sealed class Metrics : IDisposable
     /// <summary>The body of the Go write callback: batch_total, batch_exec, batch_value, batch_request.</summary>
     public void RecordWrite(long batchStart, long executionStart, WriteRequest request, Exception? err)
     {
-        var attrs = MetricsUtils.Attrs("write", err);
-        _batchTotalTime.Record(_sinceFunc(batchStart), attrs);
-        _batchExecTime.Record(_sinceFunc(executionStart), attrs);
-        var (valueSize, requestCount) = MetricsUtils.WriteMetrics(request);
-        _batchValue.Record(valueSize, attrs);
-        _batchRequests.Record(requestCount, attrs);
+        try   // see RecordOp: observer exceptions must never change an operation's outcome (review R1-2)
+        {
+            var attrs = MetricsUtils.Attrs("write", err);
+            _batchTotalTime.Record(_sinceFunc(batchStart), attrs);
+            _batchExecTime.Record(_sinceFunc(executionStart), attrs);
+            var (valueSize, requestCount) = MetricsUtils.WriteMetrics(request);
+            _batchValue.Record(valueSize, attrs);
+            _batchRequests.Record(requestCount, attrs);
+        }
+        catch (Exception)
+        {
+        }
     }
 
     /// <summary>The body of the Go read callback.</summary>
     public void RecordRead(long batchStart, long executionStart, ReadResponse? response, Exception? err)
     {
-        var attrs = MetricsUtils.Attrs("read", err);
-        _batchTotalTime.Record(_sinceFunc(batchStart), attrs);
-        _batchExecTime.Record(_sinceFunc(executionStart), attrs);
-        var (valueSize, requestCount) = MetricsUtils.ReadMetrics(response);
-        _batchValue.Record(valueSize, attrs);
-        _batchRequests.Record(requestCount, attrs);
+        try   // see RecordOp (review R1-2)
+        {
+            var attrs = MetricsUtils.Attrs("read", err);
+            _batchTotalTime.Record(_sinceFunc(batchStart), attrs);
+            _batchExecTime.Record(_sinceFunc(executionStart), attrs);
+            var (valueSize, requestCount) = MetricsUtils.ReadMetrics(response);
+            _batchValue.Record(valueSize, attrs);
+            _batchRequests.Record(requestCount, attrs);
+        }
+        catch (Exception)
+        {
+        }
     }
 }

@@ -22,6 +22,21 @@ Every ported C# file carries a `PORT NOTE` header repeating this commit, the ups
 * `tests/Oxia.Client.IntegrationTests/README.md` — how the reusable Docker Oxia server fixture works.
 * `benchmarks/README.md` — benchmark catalogue and the allocation budget per operation.
 
+## Status (test parity with the Go suite)
+
+| Go test scope | Go test functions | Ported (same names) | Notes |
+|---|---|---|---|
+| `oxia/` module (client unit tests) | **221** | **221** | components C 30, D 49, E 36, F1 45, F2 61 — nothing skipped |
+| `common/` (client-relevant packages) | 98 (+3 `disable_trap`) | 97 run + 4 skipped | skipped: 3 `disable_trap` build-flavour tests, 1 server-side `Register` test |
+| `common/rpc/logging_client_rpc_test.go` | 3 | 3 | component A |
+| `tests/client`, `tests/sequence`, `tests/resolver`, `tests/assignments` (integration, real server) | 56 | 56 | 48 on the standalone Docker server, 8 on the opt-in coordinator cluster profile (`OXIA_TEST_CLUSTER=1`) |
+| `tests/security/{tls,auth}` | 9 | 9 | cluster-profile fixture (`oxia server` has the TLS/auth flags, standalone does not); see `docs/porting/T2-security.md` |
+
+Beyond the ports: differential/byte-exactness/fuzz tests of the hand-written wire codecs against the protoc-generated classes,
+allocation-budget tests (Release only), concurrency stress tests, and the reusable-Docker integration fixture self-tests.
+Run everything: `dotnet test tests/Oxia.Client.Tests -c Release` and `dotnet test tests/Oxia.Client.IntegrationTests -c Release`
+(add `OXIA_TEST_CLUSTER=1` for the cluster profile).
+
 ## Component tables
 
 (aggregated here by the lead after each merge; see the individual files)
