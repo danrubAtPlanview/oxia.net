@@ -1,4 +1,11 @@
 // =====================================================================================================================
+// PORT NOTE (independent-review regression/differential test; no Go test counterpart)
+//   Upstream : oxia/internal/write_stream.go (streamWrapper.Send / handleResponses)
+//   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
+//   Intent   : Stress test of StreamWrapper: every completed request gets its own response although a third of the callers give up at random moments; the stream never fails because a caller left. (Also exposed the pooled-Future reuse race fixed in Future<T>.Reset.)
+//   See      : docs/review-findings.md
+// =====================================================================================================================
+// =====================================================================================================================
 // R2 review (fidelity) -- StreamWrapper: FIFO alignment of requests and responses under cancellation.
 //
 // One caller at a time (the batcher of a shard sends one request at a time) issues requests with random deadlines on a stream whose

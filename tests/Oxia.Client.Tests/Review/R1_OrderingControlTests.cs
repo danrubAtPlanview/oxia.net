@@ -1,4 +1,11 @@
 // =====================================================================================================================
+// PORT NOTE (independent-review regression/differential test; no Go test counterpart)
+//   Upstream : oxia/internal/batch/write_manager.go, oxia/batch/batcher.go, oxia/internal/batch/write_batch.go
+//   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
+//   Intent   : Control tests from review R1: ordering and exactly-once invariants that were checked and found faithful (pipelined puts across queue/batch sizes, reroute through cascaded splits, completion exactly once after Close). Guard against regressions.
+//   See      : docs/review-findings.md
+// =====================================================================================================================
+// =====================================================================================================================
 // REVIEW R1 -- CONTROL tests (they PASS today).  They pin the ordering behaviour that was checked and found faithful to Go, so a
 // fix of defect R1-1 (R1_HoldOrderTests) cannot silently break it:
 //   * one caller's pipelined puts to one shard are applied in issue order whatever the queue capacity / batch size / linger;

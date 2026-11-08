@@ -1,4 +1,11 @@
 // =====================================================================================================================
+// PORT NOTE (independent-review regression/differential test; no Go test counterpart)
+//   Upstream : oxia/internal/shard_manager.go (update runs the shards-replaced listener inside the write lock; readers block, then see shards and successors)
+//   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
+//   Intent   : Pins review finding R2-D1: writes racing a split must not fail with ErrShardNotFound; the successors have to be visible to lock-free readers before the listener retires the removed shard's gate.
+//   See      : docs/review-findings.md
+// =====================================================================================================================
+// =====================================================================================================================
 // R2 review (fidelity) -- shard map publication vs. the ShardsReplaced listener.
 //
 // Go (oxia/internal/shard_manager.go:306-336, update): recordSuccessors -> onShardsReplaced runs INSIDE s.Lock(), and Get /

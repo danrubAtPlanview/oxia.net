@@ -1,4 +1,11 @@
 // =====================================================================================================================
+// PORT NOTE (independent-review regression/differential test; no Go test counterpart)
+//   Upstream : oxia/internal/batch/write_manager.go (writeGate), oxia/sessions.go (executeWithSessionId), oxia/async_client_impl.go (Put/Delete)
+//   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
+//   Intent   : Pins review findings R2-D2 (held writes released out of order) and R2-D3 (a plain Put/Delete issued after an ephemeral Put must not reach the batcher before it).
+//   See      : docs/review-findings.md
+// =====================================================================================================================
+// =====================================================================================================================
 // R2 review (fidelity) -- the order in which the writes of ONE caller reach the batcher of a shard.
 //
 // Go (oxia/async_client_impl.go Put/Delete/DeleteRange, oxia/sessions.go executeWithSessionId, oxia/internal/batch/write_manager.go

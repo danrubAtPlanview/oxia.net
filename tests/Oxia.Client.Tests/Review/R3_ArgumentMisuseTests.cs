@@ -1,4 +1,11 @@
 // =====================================================================================================================
+// PORT NOTE (independent-review regression/differential test; no Go test counterpart)
+//   Upstream : oxia/async_client_impl.go (DeleteRange: validateKey on both bounds; Go strings cannot be nil)
+//   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
+//   Intent   : Pins review finding R3-3: DeleteRange with a null bound used to return a ValueTask that never completed.
+//   See      : docs/review-findings.md
+// =====================================================================================================================
+// =====================================================================================================================
 // REVIEW R3 -- reproduction tests (they FAIL until the production code is fixed; they never touch existing tests)
 //   Defect   : a null key / range bound passed to the async client makes the returned ValueTask NEVER complete.
 //   Go       : strings cannot be nil; every call returns a result (ErrInvalidOptions for an invalid key, validateKey,

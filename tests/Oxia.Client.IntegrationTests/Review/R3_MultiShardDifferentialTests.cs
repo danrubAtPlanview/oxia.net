@@ -1,4 +1,11 @@
 // =====================================================================================================================
+// PORT NOTE (independent-review regression/differential test; no Go test counterpart)
+//   Upstream : oxia/async_client_impl.go (doMultiShardGet/selectResponse, List, RangeScan merge), oxia/key_order.go, oxia/results_heap.go
+//   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
+//   Intent   : Differential test: a 1-shard server is the oracle for a 4-shard server holding the same random multi-level / non-ASCII / astral keys; compares scans, lists, secondary-index scans, Floor/Ceiling/Lower/Higher/Equal gets (also through an index) and DeleteRange across shards. Verified faithful by review R3; kept as a regression guard.
+//   See      : docs/review-findings.md
+// =====================================================================================================================
+// =====================================================================================================================
 // REVIEW R3 -- differential (property) test against the real server.
 //   Oracle   : a 1-shard server orders keys / secondary keys / floor-ceiling answers itself (no client merge involved).  A 4-shard
 //              server holding the SAME records must give the same answers through the client's merge (KeyOrder, ResultHeap,

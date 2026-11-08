@@ -1,4 +1,11 @@
 // =====================================================================================================================
+// PORT NOTE (independent-review regression/differential test; no Go test counterpart)
+//   Upstream : oxia/internal/batch/write_manager.go (writeGate.add / predecessorDone: Go's Put blocks inside Add, so one caller's writes reach the batcher in issue order)
+//   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
+//   Intent   : Pins review finding R1-1: writes held by a new shard after a split must reach the batcher in the order one caller issued them (a later write used to overtake the still-waking held ones).
+//   See      : docs/review-findings.md
+// =====================================================================================================================
+// =====================================================================================================================
 // REVIEW R1 (fidelity review of batching / call model / write ordering) -- reproduction tests.
 //   Defect   : R1-1  A shard that HOLDS its writes (WriteGate.AddSlowAsync, `await Task.WhenAny(held, closed)`) does not release
 //                    the parked writes in arrival order, and a write issued after the hold was released overtakes the writes that

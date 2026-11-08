@@ -1,4 +1,11 @@
 // =====================================================================================================================
+// PORT NOTE (independent-review regression/differential test; no Go test counterpart)
+//   Upstream : oxia/cache.go (ristretto.NewCache{NumCounters, MaxCost 64 MiB, BufferItems}; SetWithTTL / Del / Clear / Wait / Close)
+//   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
+//   Intent   : Concurrency stress of the CostCache that replaces ristretto: accounting stays exact, bounds hold and Close behaves like ristretto's under 8 threads of Set/Get/Del/Clear/TTL.
+//   See      : docs/review-findings.md
+// =====================================================================================================================
+// =====================================================================================================================
 // REVIEW R3 -- stress test of Internal/CostCache.cs (the ristretto replacement): concurrent Set / TryGet / Del / Clear / Close
 // with short TTLs and eviction pressure must leave the accounting (UsedCost, Count) equal to what is really stored, never
 // above MaxCost / MaxItems.  Go reference: ristretto's contract used by oxia/cache.go (Get, SetWithTTL, Wait, Del, Clear, Close).

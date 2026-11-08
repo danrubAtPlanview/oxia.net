@@ -1,4 +1,11 @@
 // =====================================================================================================================
+// PORT NOTE (independent-review regression/differential test; no Go test counterpart)
+//   Upstream : oxia/internal/metrics/metrics.go (OTel instruments never throw into the caller), oxia/internal/batch/write_batch.go (handle/Fail complete each call exactly once)
+//   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
+//   Intent   : Pins review finding R1-2: a metrics observer that throws must not fail operations the server applied nor re-complete a recycled pooled call (ABA).
+//   See      : docs/review-findings.md
+// =====================================================================================================================
+// =====================================================================================================================
 // REVIEW R1 -- reproduction tests.
 //   Defect   : R1-2  An exception thrown by a metrics observer (MeterListener callback) escapes from the batch completion path.
 //                    (a) a write the server applied is reported to the caller as FAILED (and not as "not sent"), and

@@ -1,4 +1,11 @@
 // =====================================================================================================================
+// PORT NOTE (independent-review regression/differential test; no Go test counterpart)
+//   Upstream : oxia/internal/shard_manager.go (Get, update, recordSuccessors, overlap, GetSuccessor(s))
+//   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
+//   Intent   : Differential test of the lock-free ShardManager against a literal port of Go's locked implementation over random layouts (gaps, overlaps, up to 5000 shards, uint32 extremes) and update sequences (splits, merges, same-id changes, multi-shard batches).
+//   See      : docs/review-findings.md
+// =====================================================================================================================
+// =====================================================================================================================
 // R2 review (fidelity) -- differential test of ShardManager against a literal port of Go's shard_manager.go (update,
 // recordSuccessors, overlap, Get = linear predicate scan, GetSuccessor, GetSuccessors, Exists, Leader, Changed).
 //

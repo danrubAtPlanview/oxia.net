@@ -1,4 +1,11 @@
 // =====================================================================================================================
+// PORT NOTE (independent-review regression/differential test; no Go test counterpart)
+//   Upstream : oxia/async_client_impl.go (rangeScanFromShard always delivers GetResult{Err} when ctx is done; the merge never looks at ctx)
+//   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
+//   Intent   : Pins review finding R3-1: cancelling a RangeScan must still deliver the error result instead of silently truncating the stream.
+//   See      : docs/review-findings.md
+// =====================================================================================================================
+// =====================================================================================================================
 // REVIEW R3 -- reproduction tests (they FAIL until the production code is fixed; they never touch existing tests)
 //   Defect   : a RangeScan whose token is cancelled ends SILENTLY (the reader just completes) instead of delivering a
 //              GetResult carrying the cancellation error, so the caller cannot tell a truncated scan from a complete one.

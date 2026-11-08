@@ -1,4 +1,11 @@
 // =====================================================================================================================
+// PORT NOTE (independent-review regression/differential test; no Go test counterpart)
+//   Upstream : oxia/batch/batcher.go, oxia/batch/batcher_factory.go (go process.DoWithLabels(... batcher.Run))
+//   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
+//   Intent   : Pins review findings R1-3 (the batcher loop must not inherit the ExecutionContext of the caller that created it; Go goroutines inherit nothing) and R1-4 (a lone call with a 1 ms linger completes within a few ms even on Windows' 15.6 ms timer tick).
+//   See      : docs/review-findings.md
+// =====================================================================================================================
+// =====================================================================================================================
 // REVIEW R1 -- reproduction tests.
 //   Defect R1-3 : the loop of a batcher is started on the thread of whichever caller created the batcher (the first write to a
 //                 shard) and therefore runs for the rest of the client's life inside THAT caller's ExecutionContext: AsyncLocals,

@@ -1,4 +1,11 @@
 // =====================================================================================================================
+// PORT NOTE (independent-review regression/differential test; no Go test counterpart)
+//   Upstream : oxia/sync_client_impl.go (CallContext: a write whose context ends is dropped unless already sent), oxia/internal/model/call_context.go
+//   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
+//   Intent   : Stress test (1500 racing cancellations each for Put and Delete against a recording server): every error marked 'not sent' really was not sent and every success reached the server.
+//   See      : docs/review-findings.md
+// =====================================================================================================================
+// =====================================================================================================================
 // REVIEW R3 -- high-iteration safety check of the sync client's cancellation contract (CallContext):
 //   * an error that tells the write was NOT SENT (CallContext.IsNotSent) must be true: the server never receives the key;
 //   * a write that returns successfully must have been received by the server;
