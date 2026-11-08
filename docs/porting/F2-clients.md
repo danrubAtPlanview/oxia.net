@@ -32,7 +32,25 @@ duplicate-type clashes at merge time).
 ## Benchmarks
 
 `benchmarks/Oxia.Client.Benchmarks/Client/ClientOperationBenchmarks.cs`: single and 1000-way pipelined `PutAsync`/`GetAsync`/`DeleteAsync` against an
-in-process `TestGrpcServer` that echoes success (`MemoryDiagnoser`).
+in-process `TestGrpcServer` (`MemoryDiagnoser`). The server (`RawEchoServer.cs`) allocates nothing per operation (it only counts the operations of a request
+with a protobuf tag scanner and replies with pre-serialised bytes), so the `Allocated` column is the client's own (batcher + codec + gRPC plumbing).
+Measured (ShortRun, Intel Core Ultra 9 185H, .NET 10, Release):
+
+| Benchmark | Mean | Allocated |
+|---|---|---|
+| `SinglePut` / `SingleDelete` (linger 0, one round trip) | ~131 µs | 3.7 KB / 3.4 KB per round trip (gRPC call overhead) |
+| `SingleGet` | ~380 µs | 9.7 KB |
+| `PutPipelined` (1000 ops per batch, per op) | ~1.3 µs | 164 B |
+| `GetPipelined` | ~1.6 µs | 335 B |
+| `DeletePipelined` | ~0.8 µs | 64 B |
+
+What those bytes are (GC allocation-tick profile, put): `ProtoVersion` 72 B + `PutResponse` 55 B + `PutResponse[]` 17 B = the **decoded response objects of the
+wire codec** (components A/D: "response objects are not recycled by the batch"); F2's own share is the async state machine box of the *slow* path
+(`PutAfterAddAsync`, 4 B/op average: only when `AddAsync` of the batcher is incomplete, i.e. its queue is full) -- the fast path allocates **0 B**
+(asserted by `AsyncClientImplExtraTests.PutGetDelete_AllocateNothingPerOperation_WhenTheBatcherCompletesInline`, Release only: a batcher that completes inline,
+best of 12 warmed rounds; the fake's own response objects are the only allocations). Get additionally allocates the value copy (`byte[]`, 124 B, until the
+pooled-result API lands). Recycling the response objects after `Complete` (the pooled calls copy everything they need synchronously) would take
+puts/gets/deletes to ~0 B/op end to end.
 
 ## Cross-component notes
 
