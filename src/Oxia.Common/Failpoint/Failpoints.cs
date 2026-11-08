@@ -7,6 +7,9 @@
 //              otherwise the original error.  A null `Failpoints` has no hooks (Go: nil receiver is valid).
 //              The client uses two names: "getWriteStream.closeOldStream" and "newCacheImpl.newCache".
 //              The process-wide registry (Enable/Disable/Eval) is ported too (server tests use it; harmless for the client).
+//   Divergences: methods on a possibly-nil *Failpoints (Trigger / Fail) are static methods taking a nullable instance; `func() error` hooks are
+//              `Func<Exception?>`; `Eval[T](name) (T, bool)` is `Eval<T>(name, out T value)`; the `disable_trap` build flavour (failpoint_disable.go,
+//              registry_disable.go) is not ported -- `Enabled` is the constant true.  Tests: Common/Failpoint/{FailpointTests,RegistryTests}.cs.
 // =====================================================================================================================
 using System.Collections.Concurrent;
 
