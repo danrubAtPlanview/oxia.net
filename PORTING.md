@@ -20,7 +20,9 @@ Every ported C# file carries a `PORT NOTE` header repeating this commit, the ups
 * [`DESIGN.md`](DESIGN.md) — goals, Go→C# mapping rules, performance rules, test-porting protocol.
 * `docs/porting/<component>.md` — per-component table: upstream file → C# file → status → notes.
 * `tests/Oxia.Client.IntegrationTests/README.md` — how the reusable Docker Oxia server fixture works.
-* `benchmarks/README.md` — benchmark catalogue and the allocation budget per operation.
+* `benchmarks/README.md` — benchmark catalogue and the allocation budget per operation; results: `docs/benchmark-results.md`.
+* `docs/performance.md` (throughput/latency work, .NET vs Go head-to-head), `docs/performance-allocation.md` (zero-allocation protocol and budgets).
+* `docs/review-findings.md` — the independent fidelity review: 13 defects found, fixed and pinned by regression tests; what was verified faithful; parity decisions.
 
 ## Status (test parity with the Go suite)
 
@@ -64,6 +66,9 @@ ported. Files left out, and why — check this list first when a sync diff touch
 * [F1 — sessions, notifications, sequences, cache](docs/porting/F1-sessions.md)
 * [F2 — clients & admin](docs/porting/F2-clients.md)
 * [T — test infrastructure & integration tests](docs/porting/T-integration.md)
+* [T2 — security (TLS/OIDC) integration tests](docs/porting/T2-security.md)
+* [Z1 — end-to-end allocation elimination](docs/porting/Z1-allocation.md)
+* [Z2 — throughput & latency](docs/porting/Z2-throughput.md)
 * [Z1 — end-to-end allocation elimination (wave 2)](docs/porting/Z1-allocation.md) — design, ownership protocol and measurements: [`docs/performance-allocation.md`](docs/performance-allocation.md)
 
 ## Licence
