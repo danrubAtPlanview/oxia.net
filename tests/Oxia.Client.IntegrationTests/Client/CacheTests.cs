@@ -6,8 +6,8 @@
 //              ReadModifyUpdate retries on concurrent updates, invalidation by delete-range notifications.
 //   Go tests: 8   ported: 8   skipped: 0
 //   Divergences:
-//     * ASSUMED API (component F1 owns it; adapt the three `Cache*` helpers at the bottom of this file when it lands):
-//         ICache<T>.PutAsync(ct, key, value, options) -> (Key, Version); GetAsync(ct, key) -> (Value, Version);
+//     * API used (components F1/F2 own it; it matches their in-progress sources, adapt the `NewCache` + `JsonSerde` helpers at the bottom if it changes):
+//         OxiaClient.CreateCache<T>(client, SerializeFunc, DeserializeFunc) -> ValueTask<ICache<T>>; ICache<T>.PutAsync(ct, key, value, options) -> (InsertedKey, Version); GetAsync(ct, key) -> (Value, Version);
 //         DeleteAsync(ct, key, options); ReadModifyUpdateAsync(ct, key, ModifyFunc<T>); failures are thrown like the sync client.
 //     * Go returns the zero value + zero Version alongside an error and asserts them (`assert.Equal(oxia.Version{}, version)`,
 //       `assert.Equal(testStruct{}, value)`); with a throwing API nothing is returned, so these two assertions are implied by the
@@ -38,7 +38,7 @@ public class CacheTests(OxiaServerFixture oxia)
 
         var client = await OxiaClient.CreateSyncClientAsync(standaloneServer.ServiceAddr);
 
-        var cache = NewCache(client);
+        var cache = await NewCache(client);
 
         AssertErrorIs(await TestUtil.CatchAsync(async () => await cache.GetAsync(CancellationToken.None, "/non-existing-key")), ClientErrors.KeyNotFound);
 
@@ -59,7 +59,7 @@ public class CacheTests(OxiaServerFixture oxia)
 
         var client = await OxiaClient.CreateSyncClientAsync(standaloneServer.ServiceAddr);
 
-        var cache = NewCache(client);
+        var cache = await NewCache(client);
 
         var k1 = NewKey();
         var v1 = new TestStruct("hello", 1);
@@ -102,7 +102,7 @@ public class CacheTests(OxiaServerFixture oxia)
 
         var client = await OxiaClient.CreateSyncClientAsync(standaloneServer.ServiceAddr);
 
-        var cache = NewCache(client);
+        var cache = await NewCache(client);
 
         var k1 = NewKey();
         var v1 = new TestStruct("hello", 1);
@@ -122,7 +122,7 @@ public class CacheTests(OxiaServerFixture oxia)
 
         var client = await OxiaClient.CreateSyncClientAsync(standaloneServer.ServiceAddr);
 
-        var cache = NewCache(client);
+        var cache = await NewCache(client);
 
         var k1 = NewKey();
         await client.PutAsync(CancellationToken.None, k1, B("invalid json"));
@@ -141,9 +141,9 @@ public class CacheTests(OxiaServerFixture oxia)
 
         var client2 = await OxiaClient.CreateSyncClientAsync(standaloneServer.ServiceAddr);
 
-        var cache1 = NewCache(client1);
+        var cache1 = await NewCache(client1);
 
-        var cache2 = NewCache(client2);
+        var cache2 = await NewCache(client2);
 
         var k1 = NewKey();
         var v1 = new TestStruct("hello", 1);
@@ -226,7 +226,7 @@ public class CacheTests(OxiaServerFixture oxia)
 
         var client = await OxiaClient.CreateSyncClientAsync(standaloneServer.ServiceAddr);
 
-        var cache = NewCache(client);
+        var cache = await NewCache(client);
 
         var key = "/non-existing-key-twice";
 
@@ -256,7 +256,7 @@ public class CacheTests(OxiaServerFixture oxia)
 
         var client = await OxiaClient.CreateSyncClientAsync(standaloneServer.ServiceAddr);
 
-        var cache = NewCache(client);
+        var cache = await NewCache(client);
 
         var key = NewKey();
 
@@ -311,7 +311,7 @@ public class CacheTests(OxiaServerFixture oxia)
 
         // The cache only receives the notifications of the writes made after its
         // creation, so the puts above can't evict the records it caches here
-        var cache = NewCache(client);
+        var cache = await NewCache(client);
 
         foreach (var (key, value) in values)
         {
@@ -339,10 +339,11 @@ public class CacheTests(OxiaServerFixture oxia)
         await otherClient.CloseAsync();
     }
 
-    // ---- adaptation points for the (not yet written) cache API ------------------------------------------------------------
+    // ---- adaptation points for the cache API (F1 `Cache`, F2 `OxiaClient.CreateCache`) ---------------------------------------
 
-    private static ICache<TestStruct> NewCache(ISyncClient client) =>
-        OxiaClient.CreateCache<TestStruct>(client, JsonSerde.Marshal, JsonSerde.Unmarshal);
+    /// <summary>Go: <c>oxia.NewCache[testStruct](client, json.Marshal, json.Unmarshal)</c>.</summary>
+    private static async ValueTask<ICache<TestStruct>> NewCache(ISyncClient client) =>
+        await OxiaClient.CreateCache<TestStruct>(client, JsonSerde.Marshal, JsonSerde.Unmarshal);
 
     /// <summary>Go: <c>json.Marshal</c> / <c>json.Unmarshal</c> as SerializeFunc / DeserializeFunc.</summary>
     private static class JsonSerde

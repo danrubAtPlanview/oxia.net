@@ -50,7 +50,7 @@ Not ported: see "Out of scope / follow-ups".
 ## Assumed APIs (to reconcile at merge)
 
 * `OxiaClient.CreateAsyncClientAsync/CreateSyncClientAsync(string, params ReadOnlySpan<ClientOption>)` returning `ValueTask<IAsyncClient>` / `ValueTask<ISyncClient>` (DESIGN.md signatures; the return types are an assumption).
-* Cache (F1): `OxiaClient.CreateCache<T>(ISyncClient, SerializeFunc, DeserializeFunc)` -> `ICache<T>` with
+* Cache (F1): `OxiaClient.CreateCache<T>(ISyncClient, SerializeFunc, DeserializeFunc)` -> `ValueTask<ICache<T>>` (as in the F1/F2 worktrees seen during development) with
   `PutAsync(ct, key, value, params PutOption) -> (Key, Version)`, `GetAsync(ct, key) -> (Value, Version)`, `DeleteAsync(ct, key, params DeleteOption)`,
   `ReadModifyUpdateAsync(ct, key, ModifyFunc<T>)`, `IAsyncCloser`; `SerializeFunc(object?) -> byte[]`, `DeserializeFunc(ReadOnlyMemory<byte>, Type) -> object?`,
   `ModifyFunc<T>(IOptional<T>) -> T`. Only `CacheTests.cs` (`NewCache`, `JsonSerde`) and the temporary stub depend on it.
@@ -79,7 +79,7 @@ namespace Oxia.Client
     {
         public static ValueTask<IAsyncClient> CreateAsyncClientAsync(string serviceAddress, params ReadOnlySpan<ClientOption> options) => throw new NotImplementedException();
         public static ValueTask<ISyncClient> CreateSyncClientAsync(string serviceAddress, params ReadOnlySpan<ClientOption> options) => throw new NotImplementedException();
-        public static ICache<T> CreateCache<T>(ISyncClient client, SerializeFunc serialize, DeserializeFunc deserialize) => throw new NotImplementedException();
+        public static ValueTask<ICache<T>> CreateCache<T>(ISyncClient client, SerializeFunc serialize, DeserializeFunc deserialize) => throw new NotImplementedException();
     }
     public delegate byte[] SerializeFunc(object? value);
     public delegate object? DeserializeFunc(ReadOnlyMemory<byte> data, Type type);
