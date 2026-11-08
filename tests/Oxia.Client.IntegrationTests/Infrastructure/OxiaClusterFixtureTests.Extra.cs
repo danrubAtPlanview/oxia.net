@@ -40,8 +40,15 @@ public class OxiaClusterFixtureTests(OxiaClusterFixture clusters)
         {
             await TestUtil.Eventually(async () =>
             {
-                var (shards, _) = await RawOxia.GetAssignmentsAsync(server.Public);
-                return shards.Count == 1 && shards[0].Leader == leader.Public;
+                try
+                {
+                    var (shards, _) = await RawOxia.GetAssignmentsAsync(server.Public);
+                    return shards.Count == 1 && shards[0].Leader == leader.Public;
+                }
+                catch (RpcException e) when (e.StatusCode == StatusCode.Unavailable)
+                {
+                    return false; // "server not initialized yet": a server that has not received its assignments is simply not ready, keep polling
+                }
             }, TimeSpan.FromSeconds(20), TimeSpan.FromMilliseconds(100), server.Name);
         }
 
