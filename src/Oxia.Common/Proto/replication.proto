@@ -1,0 +1,372 @@
+// Copyright 2023-2026 The Oxia Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package replication;
+
+import "client.proto";
+
+option go_package = "github.com/oxia-db/oxia/common/proto";
+
+// coordinator -> node
+service OxiaCoordination {
+  rpc PushShardAssignments(stream io.oxia.proto.v1.ShardAssignments)
+      returns (CoordinationShardAssignmentsResponse);
+
+  rpc NewTerm(NewTermRequest) returns (NewTermResponse);
+  rpc BecomeLeader(BecomeLeaderRequest) returns (BecomeLeaderResponse);
+  rpc AddFollower(AddFollowerRequest) returns (AddFollowerResponse);
+
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+  rpc DeleteShard(DeleteShardRequest) returns (DeleteShardResponse);
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+  // Deprecated: use Handshake for node initialization and feature discovery.
+  // Keep GetInfo only so new coordinators can fall back to older dataservers
+  // during rolling upgrades, and remove it in the next major version.
+  rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
+
+  // Removes an observer follower from the parent leader without fencing.
+  // Used during split abort to cleanly stop data streaming to children.
+  rpc RemoveObserver(RemoveObserverRequest) returns (RemoveObserverResponse);
+
+  // FreezeShard stops a leader from accepting new writes (or resumes it)
+  // without fencing it, so its observer/follower cursors keep streaming.
+  // Used during split cutover to quiesce the parent and let children drain
+  // the final tail before the parent is fenced.
+  rpc FreezeShard(FreezeShardRequest) returns (FreezeShardResponse);
+}
+
+// node (leader) -> node (follower)
+service OxiaLogReplication {
+  rpc Truncate(TruncateRequest) returns (TruncateResponse);
+  rpc Replicate(stream Append) returns (stream Ack);
+  rpc SendSnapshot(stream SnapshotChunk) returns (SnapshotResponse);
+}
+
+
+// Feature represents a capability that can be negotiated during leader election.
+// This enables safe rolling upgrades where new and old nodes can coexist.
+enum Feature {
+  FEATURE_UNKNOWN = 0;
+  FEATURE_DB_CHECKSUM = 1;
+  FEATURE_SECONDARY_INDEX_NAME_VALIDATION = 2;
+  // Apply the requests of a WriteRequest in op_index order
+  FEATURE_ORDERED_WRITES = 3;
+  // Delete the secondary index entries of the ephemeral records deleted when
+  // their session ends
+  FEATURE_EPHEMERAL_SECONDARY_INDEX_CLEANUP = 4;
+  // Continue the sequence of a sequential put on a prefix only from a key
+  // that starts with "<prefix>-", not from any key that starts with the prefix
+  FEATURE_SEQUENCE_LAST_KEY_SEPARATOR = 5;
+  // When a session ends, delete all its ephemeral records with the natural
+  // key sorting too
+  FEATURE_EPHEMERAL_CLEANUP_NATURAL_SORTING = 6;
+  // A delete range covers either regular keys or internal keys: one without an
+  // end stops before the internal keys, and one that covers both gets the
+  // INVALID_ARGUMENT status. One over the internal keys deletes the
+  // notification records, which are not storage entries, instead of rejecting
+  // the write request
+  FEATURE_DELETE_RANGE_NOTIFICATION_RECORDS = 7;
+  // Sequential puts: a part of the sequence without a delta keeps its value,
+  // and an invalid put, e.g. overflowing the sequence, gets the
+  // INVALID_ARGUMENT status instead of rejecting the whole write request
+  FEATURE_SEQUENCE_KEY_VALIDATION = 8;
+  // A put that overwrites a record deletes only the secondary index entries
+  // of the indexes that it drops, and writes only the ones of the indexes that
+  // it adds, instead of deleting and writing again all the entries of the
+  // record
+  FEATURE_SECONDARY_INDEX_SKIP_UNCHANGED = 9;
+  // A split child copies all the data of its parent, instead of filtering the
+  // parent's snapshot and log entries to its hash range, and deletes the
+  // records outside its hash range once the split completes. A child does so
+  // when the term of its parent pins the feature
+  FEATURE_SPLIT_DEFERRED_FILTER = 10;
+  // The leader advertises a commit offset advance to a follower with an
+  // entry-less Append when it has no entry to carry it, as it does to a
+  // split observer: a follower then applies every committed entry while the
+  // shard is idle, instead of leaving the last one until the next write.
+  // The backups taken from a follower depend on it
+  FEATURE_COMMIT_ADVERTISEMENT = 11;
+  // The leader includes the end of the range of a List or a RangeScan request
+  // with end_inclusive, and says so in its responses
+  FEATURE_RANGE_END_INCLUSIVE = 12;
+}
+
+message GetInfoRequest {
+
+}
+
+message GetInfoResponse {
+    repeated Feature features_supported = 1;
+}
+
+enum HandshakeStatus {
+  HANDSHAKE_STATUS_UNKNOWN = 0;
+  HANDSHAKE_STATUS_BOUND = 1;
+  HANDSHAKE_STATUS_ALREADY_BOUND = 2;
+  HANDSHAKE_STATUS_MISMATCH = 3;
+}
+
+message HandshakeRequest {
+  string instance_id = 1;
+}
+
+message HandshakeResponse {
+  HandshakeStatus status = 1;
+  repeated Feature features_supported = 2;
+}
+
+message CoordinationShardAssignmentsResponse {}
+
+message EntryId {
+  int64 term = 1;
+  int64 offset = 2;
+}
+
+message LogEntry {
+  int64 term = 1;
+  int64 offset = 2;
+  bytes value = 3;
+  fixed64 timestamp = 4;
+}
+
+message SnapshotChunk {
+  int64 term = 1;
+  string name = 2;
+  bytes content = 3;
+  int32 chunk_index = 4;
+  int32 chunk_count = 5;
+}
+
+enum KeySortingType {
+  UNKNOWN = 0;
+  NATURAL = 1;
+  HIERARCHICAL = 2;
+}
+
+message NewTermOptions {
+  bool enable_notifications = 1;
+  KeySortingType key_sorting = 2;
+
+  // The feature set negotiated across the shard ensemble, pinned for the
+  // whole duration of the term: every entry of the term is applied with
+  // exactly these semantics, and changing the set requires a new term.
+  // A data server that does not support all the listed features must
+  // reject the NewTerm request.
+  repeated Feature features = 3;
+}
+
+message NewTermRequest {
+  string namespace = 1;
+  int64 shard = 2;
+  int64 term = 3;
+
+  NewTermOptions options = 4;
+}
+
+message NewTermResponse {
+  EntryId head_entry_id = 1;
+
+  // The features already enabled in the node's database. The coordinator
+  // verifies that the term's negotiated feature set covers all of them
+  // before proceeding with the election.
+  repeated Feature features_enabled = 2;
+
+  // The commit offset of the node: its entries up to it, and up to its head
+  // entry, are committed. It doesn't move once the node is fenced, as the node
+  // doesn't apply any entry past it. The leader doesn't truncate the node below
+  // it. Absent when the node predates it.
+  optional int64 commit_offset = 3;
+}
+
+message BecomeLeaderRequest {
+  string namespace = 1;
+  int64 shard = 2;
+
+  int64 term = 3;
+  uint32 replication_factor = 4;
+  map<string, EntryId> follower_maps = 5;
+
+  // features_supported contains the list of features that all members of the
+  // quorum support. This enables feature negotiation during leader election
+  // to support safe rolling upgrades where new and old nodes can coexist.
+  repeated Feature features_supported = 6;
+
+  // The commit offsets that the followers reported when they got fenced, by
+  // follower, see NewTermResponse.commit_offset. A follower is absent when it
+  // didn't report one.
+  map<string, int64> follower_commit_offsets = 7;
+}
+
+message AddFollowerRequest {
+  string namespace = 1;
+  int64 shard = 2;
+
+  int64 term = 3;
+  string follower_name = 4;
+  EntryId follower_head_entry_id = 5;
+
+  // If true, this follower is an observer that does not participate
+  // in the replication quorum. Used for shard split catch-up.
+  bool observer = 6;
+
+  // For observer followers during shard split: the shard ID that the
+  // receiving server should use for the replicated data. This allows
+  // the parent leader to replicate data to a child shard on the same
+  // server without conflicting with the parent's own controllers.
+  optional int64 target_shard = 7;
+
+  // For observer followers during shard split: the hash range that the
+  // child shard should retain after receiving the parent's snapshot.
+  // The child filters its database and WAL entries to only keep keys
+  // whose hash falls within this range.
+  optional io.oxia.proto.v1.Int32HashRange split_hash_range = 8;
+
+  // The features supported by the joining follower's binary, as observed
+  // by the coordinator during the handshake. When present, the leader
+  // rejects the follower unless it covers every feature enabled for the
+  // shard. Absent when the request comes from a coordinator that predates
+  // feature-checked joins, in which case the leader skips the validation.
+  FollowerFeatures follower_features = 9;
+
+  // For observer followers during shard split: the hash range of the parent
+  // shard. Both children keep the notifications of the parent, and each
+  // delivers those whose key hash is on its side of the split, which a child
+  // tells from the bounds of its range that it shares with the parent. Absent
+  // when the request comes from a coordinator that predates it.
+  optional io.oxia.proto.v1.Int32HashRange split_parent_hash_range = 10;
+
+  // The commit offset that the follower reported when it got fenced, see
+  // NewTermResponse.commit_offset. Absent when it didn't report one.
+  optional int64 follower_commit_offset = 11;
+}
+
+message FollowerFeatures {
+  repeated Feature supported = 1;
+}
+
+message BecomeLeaderResponse {}
+
+message AddFollowerResponse {}
+
+message TruncateRequest {
+  string namespace = 1;
+  int64 shard = 2;
+
+  int64 term = 3;
+  EntryId head_entry_id = 4;
+}
+
+message TruncateResponse {
+  EntryId head_entry_id = 1;
+}
+
+message Append {
+  int64 term = 1;
+  LogEntry entry = 2;
+  int64 commit_offset = 3;
+  optional uint32 previous_entry_crc = 4;
+
+  // The leader treats acks as cumulative (an ack confirms every entry up to
+  // its offset): the follower can then acknowledge a whole sync round with a
+  // single Ack message instead of one per entry. Followers must keep sending
+  // one ack per entry when the leader does not advertise the support.
+  bool cumulative_acks_supported = 5;
+}
+
+// Acknowledges the entries up to `offset` (when the leader advertises
+// cumulative_acks_supported; a single entry otherwise).
+message Ack {
+  int64 offset = 1;
+}
+
+message SnapshotResponse {
+  int64 ack_offset = 1;
+}
+
+message DeleteShardRequest {
+  string namespace = 1;
+  int64 shard = 2;
+  int64 term = 3;
+}
+
+message DeleteShardResponse {}
+
+//// Remove Observer RPC
+
+message RemoveObserverRequest {
+  string namespace = 1;
+  int64 shard = 2;        // parent shard ID
+  int64 term = 3;
+  string follower_name = 4;
+  int64 target_shard = 5; // child shard ID — used to form the observer key
+}
+
+message RemoveObserverResponse {}
+
+message FreezeShardRequest {
+  string namespace = 1;
+  int64 shard = 2;
+  int64 term = 3;
+  // When true, the leader stops accepting new writes; when false, it resumes.
+  bool frozen = 4;
+}
+
+message FreezeShardResponse {
+  // The leader's head offset at the moment it was frozen. While frozen the
+  // head no longer advances, so this is the final offset children must reach.
+  int64 head_offset = 1;
+}
+
+//// Status RPC
+
+message GetStatusRequest {
+  int64 shard = 1;
+}
+
+enum ServingStatus {
+  NOT_MEMBER = 0;
+  FENCED = 1;
+  FOLLOWER = 2;
+  LEADER = 3;
+}
+
+message GetStatusResponse {
+  int64 term = 1;
+  ServingStatus status = 2;
+
+  int64 head_offset = 3;
+  int64 commit_offset = 4;
+
+  ShardStats shard_stats = 5;
+
+  // The features pinned by the term of the node. Only the leader reports
+  // them: absent on the followers, and on the data servers that predate the
+  // report.
+  TermFeatures term_features = 6;
+}
+
+message TermFeatures {
+  repeated Feature features = 1;
+}
+
+message ShardStats {
+  uint64 db_size_bytes = 1;
+  uint64 read_ops_total = 2;
+  uint64 write_ops_total = 3;
+  // The shard is a split child that still holds records of its parent outside
+  // its hash range: it can't be split until it deletes them
+  bool split_filter_pending = 4;
+}

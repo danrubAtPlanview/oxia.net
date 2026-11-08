@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" />
+    <ProjectReference Include="..\..\src\Oxia.Common\Oxia.Common.csproj" />
+    <ProjectReference Include="..\..\src\Oxia.Client\Oxia.Client.csproj" />
+    <ProjectReference Include="..\..\tests\Oxia.TestSupport\Oxia.TestSupport.csproj" />
+  </ItemGroup>
+</Project>

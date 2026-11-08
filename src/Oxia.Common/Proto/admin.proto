@@ -1,0 +1,155 @@
+// Copyright 2023-2026 The Oxia Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+/**
+ * Oxia Coordinator Admin API
+ */
+syntax = "proto3";
+
+package io.oxia.proto.v1;
+
+option go_package = "github.com/oxia-db/oxia/common/proto";
+option java_multiple_files = true;
+
+import "metadata.proto";
+
+service OxiaAdmin {
+
+  rpc ListDataServers(ListDataServersRequest) returns (ListDataServersResponse);
+  rpc GetDataServer(GetDataServerRequest) returns (GetDataServerResponse);
+  rpc CreateDataServer(CreateDataServerRequest) returns (CreateDataServerResponse);
+  rpc PatchDataServer(PatchDataServerRequest) returns (PatchDataServerResponse);
+  rpc DeleteDataServer(DeleteDataServerRequest) returns (DeleteDataServerResponse);
+  rpc DrainedDataServer(DrainedDataServerRequest) returns (DrainedDataServerResponse);
+
+  rpc CreateNamespace(CreateNamespaceRequest) returns (CreateNamespaceResponse);
+  rpc PatchNamespace(PatchNamespaceRequest) returns (PatchNamespaceResponse);
+  rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteNamespaceResponse);
+  rpc GetNamespace(GetNamespaceRequest) returns (GetNamespaceResponse);
+  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
+
+  /**
+   * Triggers a shard split. The specified shard is split into two child
+   * shards at the given split point (or midpoint if not specified).
+   */
+  rpc SplitShard(SplitShardRequest) returns (SplitShardResponse);
+
+}
+
+message ListDataServersRequest {
+}
+
+message ListDataServersResponse {
+  repeated DataServerView data_servers = 1;
+}
+
+message GetDataServerRequest {
+  string data_server = 1;
+}
+
+message GetDataServerResponse {
+  DataServerView data_server = 1;
+}
+
+message DataServerView {
+  DataServer data_server = 1;
+  DataServerStatus data_server_status = 2;
+}
+
+message CreateDataServerRequest {
+  DataServer data_server = 1;
+}
+
+message CreateDataServerResponse {
+  DataServer data_server = 1;
+}
+
+message PatchDataServerRequest {
+  DataServer data_server = 1;
+}
+
+message PatchDataServerResponse {
+  DataServer data_server = 1;
+}
+
+message DeleteDataServerRequest {
+  string data_server = 1;
+}
+
+message DeleteDataServerResponse {
+  DataServer data_server = 1;
+}
+
+message DrainedDataServerRequest {
+  string data_server = 1;
+}
+
+message DrainedDataServerResponse {
+}
+
+message CreateNamespaceRequest {
+  Namespace namespace = 1;
+}
+
+message CreateNamespaceResponse {
+  Namespace namespace = 1;
+}
+
+message PatchNamespaceRequest {
+  Namespace namespace = 1;
+}
+
+message PatchNamespaceResponse {
+  Namespace namespace = 1;
+}
+
+message DeleteNamespaceRequest {
+  string namespace = 1;
+}
+
+message DeleteNamespaceResponse {
+  Namespace namespace = 1;
+}
+
+message ListNamespacesRequest {
+}
+
+message ListNamespacesResponse {
+  repeated NamespaceView namespaces = 1;
+}
+
+message GetNamespaceRequest {
+  string namespace = 1;
+}
+
+message GetNamespaceResponse {
+  NamespaceView namespace = 1;
+}
+
+message NamespaceView {
+  Namespace namespace = 1;
+  NamespaceStatus namespace_status = 2;
+}
+
+message SplitShardRequest {
+  string namespace = 1;
+  int64 shard = 2;
+  // Optional: explicit split point. If omitted, split at midpoint.
+  optional uint32 split_point = 3;
+}
+
+message SplitShardResponse {
+  int64 left_child_shard = 1;
+  int64 right_child_shard = 2;
+}

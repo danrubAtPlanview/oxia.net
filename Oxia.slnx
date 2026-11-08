@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/Oxia.Client.Benchmarks/Oxia.Client.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Oxia.Client/Oxia.Client.csproj" />
+    <Project Path="src/Oxia.Common/Oxia.Common.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Oxia.Client.IntegrationTests/Oxia.Client.IntegrationTests.csproj" />
+    <Project Path="tests/Oxia.Client.Tests/Oxia.Client.Tests.csproj" />
+    <Project Path="tests/Oxia.TestSupport/Oxia.TestSupport.csproj" />
+  </Folder>
+</Solution>

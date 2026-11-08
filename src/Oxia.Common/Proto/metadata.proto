@@ -1,0 +1,267 @@
+// Copyright 2023-2026 The Oxia Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package io.oxia.proto.v1;
+
+option go_package = "github.com/oxia-db/oxia/common/proto";
+
+import "replication.proto";
+
+message DataServerIdentity {
+  // @gotags: yaml:"name,omitempty"
+  optional string name = 1;
+  // @gotags: yaml:"public"
+  string public = 2;
+  // @gotags: yaml:"internal"
+  string internal = 3;
+}
+
+message Coordinator {
+  // @gotags: yaml:"name,omitempty"
+  string name = 1;
+  // @gotags: yaml:"publicAddress,omitempty"
+  string public_address = 2;
+}
+
+message DataServerMetadata {
+  // @gotags: yaml:"labels,omitempty"
+  map<string, string> labels = 1;
+}
+
+message DataServer {
+  // @gotags: yaml:"identity,omitempty"
+  DataServerIdentity identity = 1;
+  // @gotags: yaml:"metadata,omitempty"
+  DataServerMetadata metadata = 2;
+}
+
+// The stage of a data server in its lifecycle, which the coordinator stores
+// in the cluster status:
+//
+//	RUNNING --> DRAINING --> DRAINED
+//
+// A data server removed from the configuration is DRAINING, and DRAINED once
+// no ensemble has it and every shard caught up. Whether it is reachable
+// isn't stored: only the coordinator that runs observes it.
+enum DataServerState {
+  reserved 2;
+  reserved "DATA_SERVER_STATE_UNAVAILABLE";
+  DATA_SERVER_STATE_UNSPECIFIED = 0;
+  DATA_SERVER_STATE_RUNNING = 1;
+  DATA_SERVER_STATE_DRAINING = 3;
+  DATA_SERVER_STATE_DRAINED = 4;
+}
+
+message DataServerStatus {
+  // @gotags: yaml:"state,omitempty"
+  DataServerState state = 1;
+  // @gotags: yaml:"supportedFeatures,omitempty"
+  repeated replication.Feature supported_features = 2;
+  // The metadata of the data server in the configuration, kept once the data
+  // server leaves it: its replicas keep their labels until they are drained.
+  // @gotags: yaml:"metadata,omitempty"
+  DataServerMetadata metadata = 3;
+}
+
+message AntiAffinity {
+  // @gotags: yaml:"labels,omitempty"
+  repeated string labels = 1;
+  // @gotags: yaml:"mode,omitempty"
+  string mode = 2;
+}
+
+message Namespace {
+  // @gotags: yaml:"name,omitempty"
+  string name = 1;
+  // @gotags: yaml:"initialShardCount,omitempty"
+  uint32 initial_shard_count = 2;
+  // @gotags: yaml:"replicationFactor,omitempty"
+  uint32 replication_factor = 3;
+  // @gotags: yaml:"notificationsEnabled,omitempty"
+  optional bool notifications_enabled = 4;
+  // @gotags: yaml:"keySorting,omitempty"
+  string key_sorting = 5;
+  // @gotags: yaml:"antiAffinities,omitempty"
+  repeated AntiAffinity anti_affinities = 6;
+}
+
+message LoadBalancer {
+  // @gotags: yaml:"scheduleInterval,omitempty"
+  string schedule_interval = 1;
+  // Unused: kept so that a configuration that sets it still loads.
+  // @gotags: yaml:"quarantineTime,omitempty"
+  string quarantine_time = 2;
+}
+
+message AutoSplitConfig {
+  // @gotags: yaml:"enabled,omitempty"
+  bool enabled = 1;
+  // @gotags: yaml:"maxShardSizeMb,omitempty"
+  uint32 max_shard_size_mb = 2;
+  // @gotags: yaml:"maxThroughputOps,omitempty"
+  uint32 max_throughput_ops = 3;
+  // @gotags: yaml:"stabilizationPeriod,omitempty"
+  string stabilization_period = 4;
+  // @gotags: yaml:"cooldownPeriod,omitempty"
+  string cooldown_period = 5;
+  // @gotags: yaml:"maxShardsPerNamespace,omitempty"
+  uint32 max_shards_per_namespace = 6;
+  // @gotags: yaml:"collectionInterval,omitempty"
+  string collection_interval = 7;
+}
+
+message ClusterConfiguration {
+  // @gotags: yaml:"namespaces,omitempty"
+  repeated Namespace namespaces = 1;
+  // @gotags: yaml:"servers,omitempty"
+  repeated DataServerIdentity servers = 2;
+  // @gotags: yaml:"allowExtraAuthorities,omitempty"
+  repeated string allow_extra_authorities = 3;
+  // @gotags: yaml:"serverMetadata,omitempty"
+  map<string, DataServerMetadata> server_metadata = 4;
+  // @gotags: yaml:"loadBalancer,omitempty"
+  LoadBalancer load_balancer = 5;
+  // @gotags: yaml:"coordinators,omitempty"
+  repeated Coordinator coordinators = 6;
+  // @gotags: yaml:"autoSplit,omitempty"
+  AutoSplitConfig auto_split = 7;
+  // Annotations hold new or temporary settings until they become fields of
+  // the configuration; the maintainers decide when. The keys are reserved for
+  // Oxia, and an unknown key is logged and ignored. The user maintains the
+  // annotations: the coordinator only reads them, but for the removals of the
+  // admin API below.
+  //
+  // # confirmed-drained-data-servers
+  //
+  // The data servers whose drain the user confirms, by name and separated by
+  // commas, e.g. "ds-4,ds-5". To decommission a data server:
+  //
+  //   1. Remove its name from this list, if it is there.
+  //   2. Remove it from servers: the coordinator drains it.
+  //   3. Wait until its status is DRAINED, then shut it down.
+  //   4. Add its name to this list: the coordinator removes it from the
+  //      status and from the pending deletes of the shards. Its copies on
+  //      disk are left as they are.
+  //
+  // A listed name that is still in servers, or not DRAINED yet, is ignored
+  // until a later reconcile. Once removed, the name is free: a data server
+  // that joins with it is a new one, and must start with an empty disk.
+  //
+  // The admin API doesn't add names to this list: DeleteDataServer does 1 and
+  // 2 in a single write, and DrainedDataServer forgets the data server at
+  // once. CreateDataServer removes the name from this list too.
+  //
+  // @gotags: yaml:"annotations,omitempty"
+  map<string, string> annotations = 8;
+}
+
+message HashRange {
+  // @gotags: yaml:"min"
+  uint32 min = 1;
+  // @gotags: yaml:"max"
+  uint32 max = 2;
+}
+
+enum SplitPhase {
+  Bootstrap = 0;
+  CatchUp = 1;
+  Cutover = 2;
+  // The cutover passed the point of no return: the split can only complete.
+  Finalize = 3;
+}
+
+message SplitMetadata {
+  // @gotags: yaml:"phase"
+  SplitPhase phase = 1;
+  // @gotags: yaml:"parentShardId"
+  int64 parent_shard_id = 2;
+  // @gotags: yaml:"childShardIds,omitempty"
+  repeated int64 child_shard_ids = 3;
+  // @gotags: yaml:"splitPoint"
+  uint32 split_point = 4;
+  // @gotags: yaml:"snapshotOffset,omitempty"
+  int64 snapshot_offset = 5;
+  // @gotags: yaml:"parentTermAtBootstrap,omitempty"
+  int64 parent_term_at_bootstrap = 6;
+  // @gotags: yaml:"childLeadersAtBootstrap,omitempty"
+  map<int64, string> child_leaders_at_bootstrap = 7;
+}
+
+// A change of one member of the ensemble, pending until a majority of the new
+// ensemble has every entry: until then, from is fenced and a leader candidate,
+// and the ensemble before the change is the ensemble without to, with from.
+message EnsembleChangeMetadata {
+  // @gotags: yaml:"from"
+  DataServerIdentity from = 1;
+  // @gotags: yaml:"to"
+  DataServerIdentity to = 2;
+}
+
+enum ShardStatus {
+  ShardStatusUnknown = 0;
+  SteadyState = 1;
+  Election = 2;
+  Deleting = 3;
+}
+
+message ShardMetadata {
+  // @gotags: yaml:"status"
+  ShardStatus status = 1;
+  // @gotags: yaml:"term"
+  int64 term = 2;
+  // @gotags: yaml:"leader,omitempty"
+  DataServerIdentity leader = 3;
+  // @gotags: yaml:"ensemble,omitempty"
+  repeated DataServerIdentity ensemble = 4;
+  // Replaced by ensemble_change.
+  // @gotags: yaml:"removedNodes,omitempty"
+  repeated DataServerIdentity removed_nodes = 5 [deprecated = true];
+  // @gotags: yaml:"pendingDeleteShardNodes,omitempty"
+  repeated DataServerIdentity pending_delete_shard_nodes = 6;
+  // @gotags: yaml:"int32HashRange,omitempty"
+  HashRange int32_hash_range = 7;
+  // @gotags: yaml:"split,omitempty"
+  SplitMetadata split = 8;
+  // Unset when no change of the ensemble is pending.
+  // @gotags: yaml:"ensembleChange,omitempty"
+  EnsembleChangeMetadata ensemble_change = 9;
+  // False from each new term, until every member of the ensemble has committed
+  // the head entry of the leader at the election, so has every entry committed
+  // before it: e.g. the data server added by a change of the ensemble.
+  // @gotags: yaml:"ensembleCaughtUp,omitempty"
+  bool ensemble_caught_up = 10;
+}
+
+message NamespaceStatus {
+  // @gotags: yaml:"replicationFactor"
+  uint32 replication_factor = 1;
+  // @gotags: yaml:"shards"
+  map<int64, ShardMetadata> shards = 2;
+}
+
+message ClusterStatus {
+  // @gotags: yaml:"namespaces,omitempty"
+  map<string, NamespaceStatus> namespaces = 1;
+  // @gotags: yaml:"shardIdGenerator,omitempty"
+  int64 shard_id_generator = 2;
+  // @gotags: yaml:"serverIdx,omitempty"
+  uint32 server_idx = 3;
+  // @gotags: yaml:"instanceId,omitempty"
+  string instance_id = 4;
+  // The data servers, by name, with their stored state.
+  // @gotags: yaml:"dataServers,omitempty"
+  map<string, DataServerStatus> data_servers = 5;
+}

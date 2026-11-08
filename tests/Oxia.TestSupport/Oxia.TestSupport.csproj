@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Shared test infrastructure: in-process mock Oxia gRPC servers (Kestrel) and the reusable Docker Oxia fixture. -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Oxia.TestSupport</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Grpc.AspNetCore" />
+    <ProjectReference Include="..\..\src\Oxia.Common\Oxia.Common.csproj" />
+    <ProjectReference Include="..\..\src\Oxia.Client\Oxia.Client.csproj" />
+  </ItemGroup>
+</Project>

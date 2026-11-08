@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Port of github.com/oxia-db/oxia/oxia (the Go client module). See PORTING.md. -->
+  <PropertyGroup>
+    <RootNamespace>Oxia.Client</RootNamespace>
+    <AssemblyName>Oxia.Client</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Oxia.Common\Oxia.Common.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Oxia.Client.Tests" />
+    <InternalsVisibleTo Include="Oxia.Client.IntegrationTests" />
+    <InternalsVisibleTo Include="Oxia.TestSupport" />
+    <InternalsVisibleTo Include="Oxia.Client.Benchmarks" />
+  </ItemGroup>
+</Project>
