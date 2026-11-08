@@ -58,7 +58,7 @@ using Oxia.Common.Time;
 namespace Oxia.Client.Internal;
 
 /// <summary>Go: rpcProvider.</summary>
-public sealed class RpcProvider : IRpcProvider
+public sealed class RpcProvider : IRpcProvider, IStreamingExecutor
 {
     /// <summary>
     /// Go: errShardHasNoLeader -- replaces connecting to the empty leader address of a shard that has no leader, e.g. while one is
@@ -249,7 +249,14 @@ public sealed class RpcProvider : IRpcProvider
         }
     }
 
-    public async ValueTask ExecuteList(CancellationToken ct, ListRequest request, Func<ListResponse, Exception?> listResponseConsumer)
+    public ValueTask ExecuteList(CancellationToken ct, ListRequest request, Func<ListResponse, Exception?> listResponseConsumer)
+        => ExecuteList(ct, request, response => new ValueTask<Exception?>(listResponseConsumer(response)));
+
+    public ValueTask ExecuteRangeScan(CancellationToken ct, RangeScanRequest request, Func<RangeScanResponse, Exception?> rangeScanResponseConsumer)
+        => ExecuteRangeScan(ct, request, response => new ValueTask<Exception?>(rangeScanResponseConsumer(response)));
+
+    /// <summary>The next response is received only after the consumer returned: a consumer that waits back-pressures the server.</summary>
+    public async ValueTask ExecuteList(CancellationToken ct, ListRequest request, Func<ListResponse, ValueTask<Exception?>> listResponseConsumer)
     {
         bool verified = false;
         await ExecuteWithRetry<object?>(ct, async hint =>
@@ -262,7 +269,7 @@ public sealed class RpcProvider : IRpcProvider
                 var response = await stream.RecvAsync(ct).ConfigureAwait(false);
                 if (response is null) return null;
 
-                var err = listResponseConsumer(response);
+                var err = await listResponseConsumer(response).ConfigureAwait(false);
                 if (err is not null) throw OxiaErrors.ToThrowable(err);
                 verified = true;
             }
@@ -270,7 +277,7 @@ public sealed class RpcProvider : IRpcProvider
     }
 
     public async ValueTask ExecuteRangeScan(CancellationToken ct, RangeScanRequest request,
-        Func<RangeScanResponse, Exception?> rangeScanResponseConsumer)
+        Func<RangeScanResponse, ValueTask<Exception?>> rangeScanResponseConsumer)
     {
         bool verified = false;
         await ExecuteWithRetry<object?>(ct, async hint =>
@@ -283,7 +290,7 @@ public sealed class RpcProvider : IRpcProvider
                 var response = await stream.RecvAsync(ct).ConfigureAwait(false);
                 if (response is null) return null;
 
-                var err = rangeScanResponseConsumer(response);
+                var err = await rangeScanResponseConsumer(response).ConfigureAwait(false);
                 if (err is not null) throw OxiaErrors.ToThrowable(err);
                 verified = true;
             }

@@ -157,6 +157,9 @@ internal sealed class Connection : IAsyncCloser
             var options = new GrpcChannelOptions
             {
                 HttpHandler = handler,
+                // Grpc.Net.Client does not dispose a caller-supplied handler; without this the HTTP/2 connection (infinite idle
+                // timeout + keepalive pings) outlives CloseAsync, whereas Go's ClientConn.Close() closes the transport (review R4-1).
+                DisposeHttpClient = true,
                 MaxReceiveMessageSize = Constants.MaxGrpcFrameSize,
             };
 

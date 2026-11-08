@@ -61,6 +61,15 @@ public sealed class ShardManager : IShardManager
     private readonly object _gate = new();
 
     private ShardMap _map;
+
+    /// <summary>
+    /// The shards that replaced each removed shard, copy-on-write.  Published BEFORE the shards-replaced listener runs (and
+    /// therefore before the new map): in Go the listener runs under the write lock, so a reader that arrives mid-update blocks
+    /// and then sees the successors; here readers are lock-free, so a write that was routed to a shard the listener has just
+    /// retired and is forwarded to its successors must be able to find them (review R2-D1).
+    /// </summary>
+    private Dictionary<long, Shard[]> _successors = new();
+
     private TaskCompletionSource _changedSource;
     private int _keySorting;
     private volatile bool _initialized;
@@ -158,7 +167,7 @@ public sealed class ShardManager : IShardManager
 
     public long[]? GetSuccessors(long shardId)
     {
-        if (!Volatile.Read(ref _map).Successors.TryGetValue(shardId, out var successors)) return null;
+        if (!Volatile.Read(ref _successors).TryGetValue(shardId, out var successors)) return null;
         var ids = new long[successors.Length];
         for (int i = 0; i < successors.Length; i++) ids[i] = successors[i].Id;
         return ids;
@@ -166,8 +175,7 @@ public sealed class ShardManager : IShardManager
 
     public bool GetSuccessor(long shardId, string key, out long successorShardId)
     {
-        var map = Volatile.Read(ref _map);
-        if (map.Successors.TryGetValue(shardId, out var successors))
+        if (Volatile.Read(ref _successors).TryGetValue(shardId, out var successors))
         {
             if (_fastStrategy is { } strategy)
             {
@@ -387,6 +395,8 @@ public sealed class ShardManager : IShardManager
             replaced[removedShard.Id] = ids;
         }
 
+        // visible to lock-free readers before the listener retires the removed shards' gates (see _successors)
+        Volatile.Write(ref _successors, successorsOut);
         _onShardsReplaced?.Invoke(replaced);
     }
 
