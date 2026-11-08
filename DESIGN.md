@@ -183,3 +183,17 @@ A component may add members/overloads, but must not change or remove these.
 * Do not edit files you do not own (except to fix a compile error in the skeleton: then tell the lead in your report).
 * `dotnet build` the projects you touch (not necessarily the whole solution) with `-nologo -v q`. Warnings are errors.
 * Final report: files created, test counts (Go vs ported vs passing), skipped tests with reasons, cross-component defects, open questions.
+
+## Decisions log (lead, during integration)
+
+* **Write-batch pipelining: rejected.** Prototyped by wave 2 (`BatcherFactory.ExperimentalMaxInFlight`, off, internal): +25-30 % on one shard but -15 % on four,
+  and without an ordered retry a failing batch behind another can reorder writes to the same key. Go's "one batch in flight per shard" stays the contract.
+* **Batcher queue capacity default `max(4096, MaxRequestsPerBatch)`** (Go: `GOMAXPROCS`), exposed as the extension `OxiaOptions.WithBatchQueueCapacity`:
+  with 22 slots every add of 1000 callers parked (-40 % throughput). Same extension class as `WithMaxBatchSize`.
+* **Linger timer**: a process-wide high-resolution waitable-timer service on Windows (never `timeBeginPeriod`, which is process-wide and raises the power draw of the host).
+* **Server image for the integration fixture**: `oxia/oxia:nightly-beta` (built from upstream main; `oxia/oxia:main` on Docker Hub is stale and predates fields the pinned client uses).
+* **List/RangeScan back-pressure** follows Go (bounded per-shard channels, async consumer overloads in `IStreamingExecutor`); the first port buffered eagerly.
+* **Pooled objects and exactly-once completion**: a pooled call/future must not be touched by the previous round's completer after `Reset`/recycle
+  (`Future<T>.Reset` waits for an in-flight publish; see `docs/review-findings.md`, lead-1).
+* **Test stability policy**: ported assertions are never loosened; wall-clock-sensitive tests run in the non-parallel `R1 serial` collection, wait on events instead of sleeping,
+  and the test process pre-sizes the thread pool (`TestAssemblySetup`).
