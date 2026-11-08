@@ -283,8 +283,11 @@ public class AllocationTests(ITestOutputHelper output)
         batcher.Dispose();
 
         output.WriteLine($"end to end: {allocated} bytes for {ops} operations ({(double)allocated / ops:F2} B/op)");
-        // Budget: the loop, the batch, the request, the timeout source and the call are all reused.  What is left (measured:
-        // ~0.02 B/op) is the occasional box of an async state machine when the producer / the loop actually suspend.
-        Assert.True(allocated < ops, $"{allocated} bytes for {ops} operations");
+        // Budget: the loop, the batch, the request, the timeout source and the call are all reused.  What is left is the occasional box
+        // of a pooled async state machine when the producer / the loop actually suspend: the box cache is per thread, so the figure
+        // depends on how many distinct pool threads take part (measured 0.02 B/op on a 22-thread pool, up to ~3 B/op when the test
+        // process pre-sizes the pool to 256 threads, see TestAssemblySetup).  8 B/op keeps the guard meaningful: the smallest object
+        // allocated per operation would cost >= 24 B/op, i.e. 3x over this budget.
+        Assert.True(allocated < 8L * ops, $"{allocated} bytes for {ops} operations");
     }
 }

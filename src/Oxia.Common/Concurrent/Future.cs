@@ -40,7 +40,11 @@ public sealed class Future<T> : IValueTaskSource<T>
 
     private T? _value;
     private Exception? _error;
-    private int _claimed; // 1 once a Complete / Fail won
+    // 0 free / 1 a Complete or Fail won and is still publishing (it touches the instance until it flips to 2) / 2 fully published.
+    // Reset() waits for 1 -> 2: a recycled instance must not be touched by the completer of its previous round (otherwise a late
+    // TryResolveWaiter() of that completer could resolve the NEW round's waiter with the cleared value -- found by a stress test of
+    // StreamWrapper, which reuses its futures).
+    private int _claimed;
     private int _ready; // 1 once _value / _error are published
     private int _waiter; // NoWaiter / Waiting / Resolved
 
@@ -104,6 +108,14 @@ public sealed class Future<T> : IValueTaskSource<T>
     /// </summary>
     public void Reset()
     {
+        // A completer that won the claim may still be inside Publish() (preempted between publishing _ready and resolving the
+        // waiter): wait until it has finished with the instance.  The window is a handful of instructions.
+        if (Volatile.Read(ref _claimed) == 1)
+        {
+            var spin = new SpinWait();
+            while (Volatile.Read(ref _claimed) == 1) spin.SpinOnce();
+        }
+
         _registration.Dispose();
         _registration = default;
         _core.Reset();
@@ -118,6 +130,7 @@ public sealed class Future<T> : IValueTaskSource<T>
     {
         Interlocked.Exchange(ref _ready, 1); // full fence: pairs with the one in WaitAsync
         TryResolveWaiter();
+        Volatile.Write(ref _claimed, 2); // the completer is done with the instance: Reset() may proceed
     }
 
     private ValueTask<T> ReadyResult()

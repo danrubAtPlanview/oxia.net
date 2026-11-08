@@ -13,6 +13,9 @@ using Xunit.Sdk;
 
 namespace Oxia.Client.Tests.Throughput;
 
+// The assertions compare real deadlines with a real clock: the margins below tolerate scheduling stalls of a few hundred ms, and the class
+// runs in the non-parallel collection so the rest of the suite does not stall the test thread.
+[Collection("R1 serial")]
 public class LingerTimerTests
 {
     private static long Ms(double ms) => (long)(ms * Stopwatch.Frequency / 1000.0);
@@ -72,11 +75,11 @@ public class LingerTimerTests
         var service = new LingerTimerService(false);
         var probe = new Probe(service);
         long start = Stopwatch.GetTimestamp();
-        probe.Timer.Arm(start + Ms(20));
-        probe.Timer.Arm(start + Ms(60));
-        Assert.False(probe.Fired.Wait(40), "the superseded arming (20 ms) fired");
+        probe.Timer.Arm(start + Ms(100));
+        probe.Timer.Arm(start + Ms(400));
+        Assert.False(probe.Fired.Wait(250), "the superseded arming (100 ms) fired");
         Assert.True(probe.Fired.Wait(TimeSpan.FromSeconds(5)));
-        Assert.True(probe.FiredAt - start >= Ms(59.9));
+        Assert.True(probe.FiredAt - start >= Ms(399.9));
         Assert.False(probe.Fired.Wait(100), "fired twice");
         Assert.Equal(1, probe.Count);
     }
@@ -86,9 +89,9 @@ public class LingerTimerTests
     {
         var service = new LingerTimerService(false);
         var probe = new Probe(service);
-        probe.Timer.Arm(Stopwatch.GetTimestamp() + Ms(30));
+        probe.Timer.Arm(Stopwatch.GetTimestamp() + Ms(300));
         probe.Timer.Cancel();
-        Assert.False(probe.Fired.Wait(200));
+        Assert.False(probe.Fired.Wait(600));
         Assert.Equal(0, probe.Count);
 
         // and it can be armed again
@@ -124,7 +127,7 @@ public class LingerTimerTests
 
         long start = Stopwatch.GetTimestamp();
         int[] arming = [5, 1, 7, 3, 0, 6, 2, 4];
-        foreach (int i in arming) timers[i].Arm(start + Ms(20 + 15 * i));
+        foreach (int i in arming) timers[i].Arm(start + Ms(300 + 40 * i));
 
         Assert.True(done.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal([0, 1, 2, 3, 4, 5, 6, 7], order);
