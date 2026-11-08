@@ -107,13 +107,19 @@ loopback inside the container. A cluster starts in ~0.4 s (leader elected); `Oxi
 
 Total containers: at most 2 (servers, cluster).
 
+## Security tests (TLS and OIDC) - `Security/`
+
+Port of `tests/security/tls` (6 tests) and `tests/security/auth` (3 tests), details in `docs/porting/T2-security.md`. `oxia standalone` has
+no TLS / authentication flags (only `oxia server` has), so, like the Go tests, they run a coordinator + 3 data servers, on the **cluster
+container** (`OxiaClusterFixture`) with an `OxiaClusterProfile` (extra flags + files copied into the slot's tmpfs). They are **not**
+opt-in (`OXIA_TEST_CLUSTER` is only for the other cluster tests) and are skipped with `OXIA_TEST_ADDRESS` (no Docker fixture).
+Certificates are generated per run (`TestPki`: CA + `peer` + `client`, SANs `localhost`, `127.0.0.1`, `192.168.1.2`); the OIDC provider is
+`MockOidcProvider`, a Kestrel host in the test process that the servers reach as `host.docker.internal` (Docker Desktop) or the container's
+default gateway (Linux; the provider then listens on all IPv4 interfaces).
+
 ## Not ported (listed in `docs/porting/T-integration.md`)
 
-* `tests/security/tls` (5 client tests) and `tests/security/auth` (OIDC): they need data servers started with TLS / OIDC options.
-  The cluster fixture can be extended (certificates are copied into the container with `docker exec -i ... cat > file`; the
-  server flags are `--tls-cert-file/--tls-key-file/--tls-trusted-ca-file`, `--internal-tls-*`, `--peer-tls-*`), but the client
-  side needs the `TlsOptions -> SslClientAuthenticationOptions` conversion of component B (`common/security`). The OIDC tests also need
-  a token issuer reachable from inside the container. Left for a follow-up.
+* (`tests/security/tls` and `tests/security/auth` were ported in wave 2: see "Security tests" above.)
 * Server-side suites (`tests/control`, `coordinator`, `scheduler`, `kvscript`, `embedded`, `mock`): they test the server.
 
 ## Writing a test

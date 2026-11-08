@@ -13,6 +13,10 @@
 //   Divergences: The Go tests read the leader from the coordinator's in-process metadata (`mock.StatusSnapshot`); here it is read
 //              from the shard assignments any live data server streams (the same `Leader` the clients get).  The coordinator uses
 //              the `file` metadata provider on the container tmpfs instead of the in-memory one.
+//              Wave 2 (T2, security tests): StartAsync takes an optional OxiaClusterProfile (extra `oxia server` / `oxia coordinator` flags
+//              and files written to /data/cluster<slot>/files, e.g. TLS certificates and OIDC key files); a cluster started with a profile is
+//              NOT opt-in (OXIA_TEST_CLUSTER), because `oxia standalone` has no TLS / auth flags and this is the only way to test them.
+//              GetHostAddressAsync tells how the container reaches the test host (for an OIDC provider hosted by the test process).
 // =====================================================================================================================
 using System.Collections.Concurrent;
 using System.Diagnostics;

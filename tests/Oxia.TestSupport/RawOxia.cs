@@ -5,7 +5,7 @@
 //   Intent   : A few raw gRPC calls through the protoc-generated OxiaClientClient, INDEPENDENT of the client under test.  Used
 //              by the fixture's self tests (e.g. "a new server starts empty": the first put of a fresh shard gets version 0)
 //              and available to any test that needs to look at the server without the library being tested.
-//   Divergences: n/a (new code).  Uses the unary `Write` RPC (deprecated upstream but still served) to avoid a write stream.
+//   Divergences: n/a (new code; wave 2 added the optional RawSecurity argument: TLS / bearer token for secured servers).  Uses the unary `Write` RPC (deprecated upstream but still served) to avoid a write stream.
 // =====================================================================================================================
 using Grpc.Net.Client;
 using G = Io.Oxia.Proto.V1;

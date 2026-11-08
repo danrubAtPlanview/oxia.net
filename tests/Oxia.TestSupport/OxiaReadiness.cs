@@ -5,7 +5,7 @@
 //   Intent   : Readiness probe for a freshly started `oxia` process: dials GetShardAssignments with the protoc-generated
 //              OxiaClientClient (raw gRPC, NO dependency on the client under test) until the server answers with an
 //              assignment for every expected shard and each shard has a leader address.
-//   Divergences: n/a (new code).
+//   Divergences: n/a (new code; wave 2 added the optional RawSecurity argument: TLS / bearer token for secured servers).
 // =====================================================================================================================
 using Grpc.Core;
 using Grpc.Net.Client;
