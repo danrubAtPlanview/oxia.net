@@ -262,10 +262,11 @@ public class GetResponse
     internal ProtoVersion? SpareVersion;
 
     /// <summary>
-    /// Pooled-read mode only (the request asked for pooled values): the value (and, for scans, the key) live in this lease instead of
-    /// <see cref="Value"/> / <see cref="Key"/>, which stay null.  Whoever takes the lease owns it; otherwise Reset() gives it back.
+    /// Pooled-read mode only (the request asked for pooled values; the response holds <see cref="PooledGetResponse"/> children): the
+    /// value (and, for scans, the key) live in this lease instead of <see cref="Value"/> / <see cref="Key"/>, which stay null.  Whoever
+    /// takes the lease owns it; otherwise Reset() gives it back.  (It lives in a subclass so that a classic GetResponse stays 8 bytes smaller.)
     /// </summary>
-    internal ValueLease? Lease;
+    internal ValueLease? Lease => (this as PooledGetResponse)?.Held;
 
     public Status Status;
     public ProtoVersion? Version;
@@ -277,7 +278,7 @@ public class GetResponse
         Status = default;
         if (Version is { } v) { v.Reset(); SpareVersion = v; Version = null; }
         Value = null; Key = null; SecondaryIndexKey = null;
-        if (Lease is { } lease) { lease.TryRelease(lease.Generation); Lease = null; }
+        if (this is PooledGetResponse { Held: { } lease } pooled) { lease.TryRelease(lease.Generation); pooled.Held = null; }
     }
 
     /// <summary>Length of the value in bytes whichever way it is held (0 when absent).</summary>
@@ -292,12 +293,12 @@ public class GetResponse
     /// </summary>
     internal byte[]? TakeValueArray()
     {
-        if (Lease is { } lease)
+        if (this is PooledGetResponse { Held: { } lease } pooled)
         {
             Value = lease.CopyValueToArray();
             if (Key is null && lease.KeyLength >= 0) Key = lease.KeyString();
             lease.TryRelease(lease.Generation);
-            Lease = null;
+            pooled.Held = null;
         }
         return Value;
     }
@@ -305,8 +306,9 @@ public class GetResponse
     /// <summary>Hands the lease (and with it the duty to release it) to the caller; the response no longer refers to it.</summary>
     internal ValueLease? DetachLease()
     {
-        var lease = Lease;
-        Lease = null;
+        if (this is not PooledGetResponse pooled) return null;
+        var lease = pooled.Held;
+        pooled.Held = null;
         return lease;
     }
 
@@ -328,6 +330,15 @@ public class GetResponse
         }
         return copy;
     }
+}
+
+/// <summary>A GetResponse parsed for the pooled read API: its value / key bytes are in <see cref="Held"/> (see <see cref="GetResponse.Lease"/>).</summary>
+internal sealed class PooledGetResponse : GetResponse
+{
+    internal ValueLease? Held;
+
+    /// <summary>The lease of this record, rented on first use.</summary>
+    internal ValueLease RentLease() => Held ??= ValueLease.Rent();
 }
 
 public class ReadRequest

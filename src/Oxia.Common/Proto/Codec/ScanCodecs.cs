@@ -228,7 +228,7 @@ public readonly struct RangeScanResponsePooledCodec : IPooledMessageCodec<RangeS
             {
                 case 10:
                 {
-                    GetResponse g = m.SpareRecords.TryPop() ?? new GetResponse();
+                    PooledGetResponse g = m.SpareRecords.TryPop() as PooledGetResponse ?? new PooledGetResponse();
                     long old = r.BeginMessage();
                     GetResponseCodec.MergeFromPooled(ref r, g);
                     r.EndMessage(old);

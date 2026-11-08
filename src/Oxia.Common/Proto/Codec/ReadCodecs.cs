@@ -163,7 +163,7 @@ public readonly struct GetResponseCodec : IMessageCodec<GetResponse>
     /// The pooled-read variant of <see cref="MergeFrom"/>: the value (field 3) and the key (field 4) are copied into the
     /// <see cref="ValueLease"/> of the response (rented on first use) instead of a new array and a new string.
     /// </summary>
-    public static void MergeFromPooled(ref ProtoReader r, GetResponse m)
+    internal static void MergeFromPooled(ref ProtoReader r, PooledGetResponse m)
     {
         while (r.TryReadTag(out uint tag))
         {
@@ -184,8 +184,8 @@ public readonly struct GetResponseCodec : IMessageCodec<GetResponse>
                     r.EndMessage(old);
                     break;
                 }
-                case 26: r.ReadBytesInto(m.Lease ??= ValueLease.Rent(), isKey: false); break;
-                case 34: r.ReadBytesInto(m.Lease ??= ValueLease.Rent(), isKey: true); break;
+                case 26: r.ReadBytesInto(m.RentLease(), isKey: false); break;
+                case 34: r.ReadBytesInto(m.RentLease(), isKey: true); break;
                 case 42: m.SecondaryIndexKey = r.ReadString(); break;
                 default: r.SkipField(tag); break;
             }
@@ -315,7 +315,8 @@ public readonly struct ReadResponsePooledCodec : IPooledMessageCodec<ReadRespons
             {
                 case 10:
                 {
-                    GetResponse g = m.SpareGets.TryPop() ?? new GetResponse();
+                    // (a spare left by a classic parse is a plain GetResponse: dropped, a pooled one is made)
+                    PooledGetResponse g = m.SpareGets.TryPop() as PooledGetResponse ?? new PooledGetResponse();
                     long old = r.BeginMessage();
                     GetResponseCodec.MergeFromPooled(ref r, g);
                     r.EndMessage(old);
