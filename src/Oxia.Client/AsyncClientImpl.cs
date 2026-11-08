@@ -21,6 +21,9 @@
 //        bounded channel like Go's blocking `ch <- result`.  Each shard therefore buffers its results in an unbounded
 //        per-shard queue and a pump forwards them into the (bounded: List 1 = Go's unbuffered, RangeScan 100) output channel,
 //        dropping them once the caller's token is done.  The streams are still read eagerly (no back-pressure to gRPC).
+//      * A plain write (Put/Delete/DeleteRange without an ephemeral session) goes through AddPlainWrite: lock-free unless an ephemeral put of
+//        the client still waits for its session, in which case it queues behind it (Sessions.ExecuteOrdered).  An add that does not complete
+//        synchronously is watched by a pooled AddObserver (no async state machine); the returned ValueTask is the call's own.
 //      * `go func()` -> Task.Run; `sync.WaitGroup`/`wg.Go` -> a countdown; goroutine-leak assertions of the Go tests ->
 //        RunningStreamTasks (number of List/RangeScan tasks that did not end yet).
 //      * The factory resolves the dial options of a resolver through GrpcResolverBuilder.AsDialOption.

@@ -15,9 +15,15 @@
 //   Contract with the batches: after calling `Complete` on a call, the batch must not touch the call again (the awaiter
 //              may already have recycled it).  `Complete` is idempotent (only the first outcome wins), so a call that is
 //              both failed by a shutting-down batcher and answered by the server cannot corrupt the pool.
-//   Divergences: continuations run asynchronously (ManualResetValueTaskSourceCore.RunContinuationsAsynchronously): user
-//              code never runs on the batcher loop that completes the calls (a Go goroutine woken by a channel send is
-//              scheduled, not run inline).  A `Callback` set by a decorator (metrics) on the call is still invoked.
+//   Divergences: continuations run asynchronously: user code never runs on the batcher loop that completes the calls (a Go goroutine
+//              woken by a channel send is scheduled, not run inline).  The pooled calls are THEMSELVES the thread pool work item
+//              (IThreadPoolWorkItem, CallDispatch): `Complete` stores the result and queues the call, `Execute` sets the result of the
+//              ManualResetValueTaskSourceCore, which runs the awaiter's continuation inline on the pool thread (with the core's own
+//              execution / synchronization context handling).  RunContinuationsAsynchronously would allocate a 48 B work item per
+//              completion.  A `Callback` set by a decorator (metrics) on the call is still invoked.
+//              The pool of the calls (CallPool) is a per-thread cache + a bounded lock-free queue instead of one lock (the contended point of
+//              the client with a thousand producers).  AddObserver watches an add that did not complete synchronously (queue full / shard
+//              holding its writes) and fails the call if the add fails: pooled, instead of an async state machine per slow add.
 // =====================================================================================================================
 using System.Collections.Concurrent;
 using System.Threading.Tasks.Sources;

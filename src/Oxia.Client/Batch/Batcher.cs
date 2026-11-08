@@ -10,22 +10,26 @@
 //              concurrently with it) is failed right away by wrapping it in a throwaway batch; a Barrier added to a closed
 //              batcher is completed (Done) right away.  Every call is completed or failed exactly once.
 //   Divergences (all behaviour-preserving, chosen for throughput / zero allocation per operation):
-//      * The queue is a bounded System.Threading.Channels channel (capacity = BatcherFactory.BatcherChannelBufferSize =
-//        Environment.ProcessorCount, Go: runtime.GOMAXPROCS) with SingleReader = true.  The fast path of AddAsync is a
-//        synchronous TryWrite and returns a default ValueTask (no allocation); a full queue parks the producer on a
-//        FIFO WriteAsync (back-pressure, like the blocking channel send of Go).
-//      * Go's `addMu` RWMutex + `closeC` + `addsDone` protocol is replaced by the channel completion: Dispose() calls
-//        Writer.TryComplete() (which atomically stops new writes and fails the producers parked on a full queue with
-//        ChannelClosedException -> they fail their call) and only THEN raises the `_closing` flag the loop polls.  So when
-//        the loop sees the flag (or sees the completed, empty channel) no call can be enqueued anymore and draining the
-//        queue is race free -- the same guarantee `<-b.addsDone` gives in Go.
+//      * The queue is a BatcherQueue (BatcherQueue.cs): a lock-free bounded MPSC ring (capacity = the factory's QueueCapacity; the client
+//        sizes it max(4096, MaxRequestsPerBatch), Go: runtime.GOMAXPROCS) with a single consumer, which replaced the bounded
+//        System.Threading.Channels channel of the first version.  The fast path of AddAsync is a CAS + an exchange and returns a default
+//        ValueTask (no allocation); a full queue parks the producer on a pooled IValueTaskSource, FIFO (back-pressure, like the blocking
+//        channel send of Go; new adds queue behind the parked ones, so one producer's calls stay in order).
+//      * Go's `addMu` RWMutex + `closeC` + `addsDone` protocol is replaced by the queue's close: Dispose() calls Complete() (which
+//        atomically stops new adds, fails the producers parked on a full queue through FailClosed -> their call fails with
+//        ErrShuttingDown, and wakes the loop) and only THEN raises the `_closing` flag the loop polls.  When the loop sees the flag (or
+//        a closed, drained queue) no call can be enqueued anymore and the drain (DequeueClosed, which waits for a producer between its
+//        reservation and its publication) is race free -- the same guarantee `<-b.addsDone` gives in Go.
+//      * The loop is started with the ExecutionContext flow suppressed: it lives as long as the batcher and must not inherit (and keep
+//        alive) the AsyncLocals / Activity.Current of the caller whose write created the batcher (a Go goroutine inherits nothing).
+//      * EXPERIMENT: `ExperimentalMaxInFlight` > 1 (default 1 = Go's one batch at a time) starts the next batch while earlier ones wait
+//        for their response.  A MEASUREMENT switch for docs/performance.md ("proposal: pipelined write batches"): it has no ordered retry.
 //      * The linger timer is ONE reusable LingerTimer (BatcherTimer.cs) per batcher that is only a WAKE-UP HINT for an idle
 //        loop: the deadline of the open batch is a Stopwatch timestamp the loop compares with the clock itself, so a stale
 //        or early timer tick is harmless (it re-arms).  The timer is armed lazily -- only when the loop is idle with an open
 //        batch and no earlier arming is still pending -- hence a loop that is saturated (batches complete by size) never
 //        touches the timer, and nothing is allocated per batch (no Task.Delay, no CancellationTokenSource, no exception).
-//        The tick is delivered by a sentinel object written with TryWrite (dropped when the queue is full: then the loop
-//        is not idle and checks the deadline on its own).  The wake-up service waits on a HIGH RESOLUTION timer on Windows
+//        The tick wakes the loop through BatcherQueue.Tick (no item in the queue); an idle loop re-checks the deadline.  The wake-up service waits on a HIGH RESOLUTION timer on Windows
 //        (System.Threading.Timer has the 15.6 ms OS tick there: a 5 ms linger became ~15 ms, see BatcherTimer.cs), so a
 //        linger is honoured to ~0.5 ms (Go: ns) on every platform.
 //      * `select` between callC / timeout / closeC is a sequential check order (closing first, then queue, then deadline);

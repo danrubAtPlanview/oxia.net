@@ -35,6 +35,12 @@ internal static class Tuning
                 case "multih2":
                     Oxia.Common.Rpc.TransportTuning.MultipleHttp2Connections = bool.Parse(value);
                     break;
+                case "signallocal":
+                    Oxia.Client.Batch.ConsumerSignal.PreferLocal = bool.Parse(value);
+                    break;
+                case "inlineresponse":
+                    Oxia.Client.Internal.StreamWrapper.ExperimentInlineResponse = bool.Parse(value);
+                    break;
                 case "pipeline":
                     Oxia.Client.Batch.BatcherFactory.ExperimentalMaxInFlightDefault = int.Parse(value);
                     break;

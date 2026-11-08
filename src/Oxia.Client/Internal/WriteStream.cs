@@ -45,6 +45,9 @@ namespace Oxia.Client.Internal;
 /// <summary>Go: streamWrapper.</summary>
 internal sealed class StreamWrapper
 {
+    /// <summary>EXPERIMENT (benchmarks): the continuation of Send runs inline on the receive loop instead of one thread pool hop later.</summary>
+    internal static bool ExperimentInlineResponse;
+
     private static readonly Action<ILogger, int, int, int, Exception?> LogGotResponse = LoggerMessage.Define<int, int, int>(
         LogLevel.Debug, new EventId(1, "GotResponse"), "got response (puts={Puts}, deletes={Deletes}, deleteRanges={DeleteRanges})");
 
@@ -101,7 +104,7 @@ internal sealed class StreamWrapper
         ct.ThrowIfCancellationRequested();
         var req = prepare();
 
-        var f = new Future<WriteResponse>();
+        var f = new Future<WriteResponse>(!ExperimentInlineResponse);
 
         await _sendLock.WaitAsync(ct).ConfigureAwait(false);
         try

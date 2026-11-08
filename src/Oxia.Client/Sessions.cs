@@ -20,6 +20,8 @@
 //        the head and drains the queue under the lock, so the callback may run later, on another thread.  When the session
 //        already exists and nothing is queued, the callback runs inline on the caller's thread WITHOUT taking the lock and
 //        without allocating (lock-free read of a ConcurrentDictionary; the lock is only taken to create/move/forget sessions).
+//      * ExecuteOrdered (review R2-D3): a plain write issued while an ephemeral put waits for its session is queued in the same FIFO, so it
+//        cannot overtake it (Go's Put blocks in Add until the ephemeral call is in the batcher).  Inline and lock-free when nothing waits.
 //      * `cs.started chan error` -> flags under the session's lock; the operation waiting on it registers as the session's
 //        `waiter` (plus a cancellation registration on the session token) and is resumed through OnSessionSettled.
 //      * contexts -> CancellationTokenSource (sessions token linked to the client token; session token linked to the

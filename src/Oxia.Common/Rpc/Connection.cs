@@ -26,6 +26,8 @@
 //        raised by us (grpc.NewClient does it in Go), wrapped as "error connecting to <target>: ...".
 //      * Close cannot fail (GrpcChannel.Dispose does not report errors); ClientPool still guards against it.
 //      * The OxiaClientRpc / OxiaAdminClient facades are created once per connection (they are stateless over the CallInvoker).
+//      * The health loop is started with the ExecutionContext flow suppressed (it lives as long as the connection, not as long as the
+//        caller that dialled it; a goroutine inherits nothing).  TransportTuning.cs holds optional, off-by-default transport knobs.
 // =====================================================================================================================
 using System.Net.Security;
 using System.Security.Authentication;
