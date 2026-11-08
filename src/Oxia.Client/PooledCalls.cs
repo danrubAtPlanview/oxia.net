@@ -11,12 +11,12 @@
 //                   ManualResetValueTaskSourceCore<T>; the returned ValueTask<T> wraps the call, and the call goes back to
 //                   the pool when the awaiter consumes the result (GetResult).
 //                 * The less frequent calls (single-shard DeleteRange, multi-shard Get) are not pooled but also avoid
-//                   TaskCompletionSource: DeleteRangeCompletion, MultiShardGet.
+//                   TaskCompletionSource: MultiShardGet (the delete ranges are Pooled/PooledDeleteRange.cs).
 //   Contract with the batches: after calling `Complete` on a call, the batch must not touch the call again (the awaiter
 //              may already have recycled it).  `Complete` is idempotent (only the first outcome wins), so a call that is
 //              both failed by a shutting-down batcher and answered by the server cannot corrupt the pool.
 //   Divergences: Wave 2 / Z1: MultiShardGet keeps a Clone() of the selected response (the batch response it came from is recycled once its calls
-//              completed); DeleteRangeCompletion is superseded by Pooled/PooledDeleteRange.cs (kept for reference, no longer used).
+//              completed); DeleteRangeCompletion was superseded by Pooled/PooledDeleteRange.cs and removed (Z2).
 //              Wave 2 / Z2: continuations run asynchronously: user code never runs on the batcher loop that completes the calls (a Go goroutine
 //              woken by a channel send is scheduled, not run inline).  The pooled calls are THEMSELVES the thread pool work item
 //              (IThreadPoolWorkItem, CallDispatch): `Complete` stores the result and queues the call, `Execute` sets the result of the
@@ -367,28 +367,6 @@ internal sealed class PooledGetCall : GetCall, IValueTaskSource<GetResult>, IThr
         Volatile.Write(ref _completed, 0);
         Pool.Return(this);
     }
-}
-
-/// <summary>A single-shard DeleteRange (with a partition key): the call that is also the completion source of its ValueTask.</summary>
-internal sealed class DeleteRangeCompletion : DeleteRangeCall, IValueTaskSource<Exception?>
-{
-    private ManualResetValueTaskSourceCore<Exception?> _core = new() { RunContinuationsAsynchronously = true };
-    private int _completed;
-
-    public ValueTask<Exception?> AsValueTask() => new(this, _core.Version);
-
-    public override void Complete(DeleteRangeResponse? response, Exception? error)
-    {
-        if (Interlocked.Exchange(ref _completed, 1) != 0) return;
-        base.Complete(response, error);
-        _core.SetResult(error ?? ProtoUtils.ToDeleteRangeResult(response!));
-    }
-
-    Exception? IValueTaskSource<Exception?>.GetResult(short token) => _core.GetResult(token);
-    ValueTaskSourceStatus IValueTaskSource<Exception?>.GetStatus(short token) => _core.GetStatus(token);
-
-    void IValueTaskSource<Exception?>.OnCompleted(Action<object?> continuation, object? state, short token,
-        ValueTaskSourceOnCompletedFlags flags) => _core.OnCompleted(continuation, state, token, flags);
 }
 
 /// <summary>
