@@ -155,7 +155,14 @@ internal sealed class AsyncClientImpl : IAsyncClient
     {
         foreach (var call in ModelExtensions.InOpIndexOrder(puts, deletes, deleteRanges))
         {
-            SendToSuccessors(removedShardId, call, _handOff);
+            try
+            {
+                SendToSuccessors(removedShardId, call, _handOff);
+            }
+            catch (Exception e)
+            {
+                FailCall(call, e); // this call could not be routed: fail it alone, the others still go
+            }
         }
     }
 
@@ -289,9 +296,16 @@ internal sealed class AsyncClientImpl : IAsyncClient
     {
         foreach (var get in gets)
         {
-            long shardId = ShardManager.Get(get.PartitionKeyOrKey());
-            var add = ReadBatchManager.Get(shardId).AddAsync(get);
-            if (!add.IsCompletedSuccessfully) _ = ObserveAddAsync(add, get);
+            try
+            {
+                long shardId = ShardManager.Get(get.PartitionKeyOrKey());
+                var add = ReadBatchManager.Get(shardId).AddAsync(get);
+                if (!add.IsCompletedSuccessfully) _ = ObserveAddAsync(add, get);
+            }
+            catch (Exception e)
+            {
+                FailCall(get, e); // this get could not be routed: fail it alone, the others still go
+            }
         }
     }
 

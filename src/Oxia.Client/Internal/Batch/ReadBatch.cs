@@ -138,7 +138,19 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
                 _factory.Log.LogInformation("Shard was split/merged, re-routing read batch operations shard={Shard} gets={Gets}",
                     _shardId, _gets.Count);
             }
-            reroute(new List<GetCall>(_gets));
+            // From here on the rerouter owns the gets: what it throws must not reach the batcher's catch-all, which would fail the
+            // gets that were handed off already
+            try
+            {
+                reroute(new List<GetCall>(_gets));
+            }
+            catch (Exception e)
+            {
+                if (_factory.Log.IsEnabled(LogLevel.Error))
+                {
+                    _factory.Log.LogError(e, "Re-routing the read batch operations failed (shard {Shard})", _shardId);
+                }
+            }
             return;
         }
 
@@ -169,7 +181,20 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
     {
         for (int i = 0; i < _gets.Count; i++)
         {
-            _gets[i].Complete(null, error);
+            SafeComplete(_gets[i], null, error);
+        }
+    }
+
+    // See WriteBatch.SafeComplete: a completion that throws must not stop the other gets nor reach the batcher's catch-all.
+    private void SafeComplete(GetCall call, GetResponse? response, Exception? error)
+    {
+        try { call.Complete(response, error); }
+        catch (Exception e)
+        {
+            if (_factory.Log.IsEnabled(LogLevel.Error))
+            {
+                _factory.Log.LogError(e, "A read completion callback threw; the exception was ignored (shard {Shard})", _shardId);
+            }
         }
     }
 
@@ -180,11 +205,11 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
         {
             if (i < results.Count)
             {
-                _gets[i].Complete(results[i], null);
+                SafeComplete(_gets[i], results[i], null);
             }
             else
             {
-                _gets[i].Complete(null, new OxiaException("the read response has fewer results than the read request has gets"));
+                SafeComplete(_gets[i], null, new OxiaException("the read response has fewer results than the read request has gets"));
             }
         }
     }
