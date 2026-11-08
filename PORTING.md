@@ -30,7 +30,7 @@ Every ported C# file carries a `PORT NOTE` header repeating this commit, the ups
 | `common/` (client-relevant packages) | 98 (+3 `disable_trap`) | 97 run + 4 skipped | skipped: 3 `disable_trap` build-flavour tests, 1 server-side `Register` test |
 | `common/rpc/logging_client_rpc_test.go` | 3 | 3 | component A |
 | `tests/client`, `tests/sequence`, `tests/resolver`, `tests/assignments` (integration, real server) | 56 | 56 | 48 on the standalone Docker server, 8 on the opt-in coordinator cluster profile (`OXIA_TEST_CLUSTER=1`) |
-| `tests/security/{tls,auth}` | 9 | in progress (wave 2) | see `docs/porting/T2-security.md` |
+| `tests/security/{tls,auth}` | 9 | 9 | cluster-profile fixture (`oxia server` has the TLS/auth flags, standalone does not); see `docs/porting/T2-security.md` |
 
 Beyond the ports: differential/byte-exactness/fuzz tests of the hand-written wire codecs against the protoc-generated classes,
 allocation-budget tests (Release only), concurrency stress tests, and the reusable-Docker integration fixture self-tests.
