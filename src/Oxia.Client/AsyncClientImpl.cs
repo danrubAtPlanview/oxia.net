@@ -708,10 +708,19 @@ internal sealed class AsyncClientImpl : IAsyncClient
         using var retryCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         retryCts.CancelAfter(Options.RequestTimeout);
 
-        // The consumer of the executor is synchronous: the results of the shard are queued here and forwarded to the output
-        // by a pump that (like Go's `select { case ch <- result: case <-ctx.Done(): }`) drops them once ct is done
+        // PROTOTYPE (R3): with an executor whose consumer may await (the RpcProvider), the consumer waits for room in the output
+        // (Go: `select { case ch <- result: case <-ctx.Done(): }`), so the next message of the gRPC stream is not read until the
+        // caller consumed the previous one: HTTP/2 flow control back-pressures the server.  Other executors (test fakes) keep
+        // the eager unbounded queue + pump.
         var local = Channel.CreateUnbounded<ListResult>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
-        var pump = PumpAsync(local.Reader, output, ct);
+        bool streaming = Executor is IStreamingExecutor;
+        var pump = streaming ? Task.CompletedTask : PumpAsync(local.Reader, output, ct, null, Options.RequestTimeout);
+
+        async ValueTask Send(ListResult result)
+        {
+            if (!streaming) { local.Writer.TryWrite(result); return; }
+            try { await output.WriteAsync(result, ct).ConfigureAwait(false); } catch (OperationCanceledException) { /* ct done: drop */ }
+        }
 
         // Older servers ignore EndInclusive, and leave the end out: a leader that includes it says so in all its
         // responses, and sends at least one
@@ -719,7 +728,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
         Exception? err = null;
         try
         {
-            await Executor.ExecuteList(retryCts.Token, request, response =>
+            async ValueTask<Exception?> Consume(ListResponse response)
             {
                 if (request.EndInclusive && !response.EndInclusive)
                 {
@@ -728,10 +737,19 @@ internal sealed class AsyncClientImpl : IAsyncClient
                 responded = true;
                 if (response.Keys.Count > 0 && !ct.IsCancellationRequested)
                 {
-                    local.Writer.TryWrite(new ListResult(response.Keys.ToArray(), null));
+                    await Send(new ListResult(response.Keys.ToArray(), null)).ConfigureAwait(false);
                 }
                 return null;
-            }).ConfigureAwait(false);
+            }
+
+            if (Executor is IStreamingExecutor se)
+            {
+                await se.ExecuteList(retryCts.Token, request, Consume).ConfigureAwait(false);
+            }
+            else
+            {
+                await Executor.ExecuteList(retryCts.Token, request, response => Consume(response).Result).ConfigureAwait(false);
+            }
         }
         catch (Exception e)
         {
@@ -743,20 +761,29 @@ internal sealed class AsyncClientImpl : IAsyncClient
         }
         if (err is not null)
         {
-            local.Writer.TryWrite(new ListResult(null, err));
+            await Send(new ListResult(null, err)).ConfigureAwait(false);
         }
         local.Writer.TryComplete();
         await pump.ConfigureAwait(false);
     }
 
-    /// <summary>Forwards the queued results to the output, waiting for room; once ct is done the remaining results are dropped.</summary>
-    private static async Task PumpAsync<T>(ChannelReader<T> source, ChannelWriter<T> target, CancellationToken ct)
+    /// <summary>Delivers the final error of a stream even though the caller's token is done (Go never drops it); bounded by a grace period so an abandoned reader cannot leak the task.</summary>
+    private static async ValueTask DeliverErrorAsync<T>(ChannelWriter<T> target, T item, TimeSpan grace)
+    {
+        if (target.TryWrite(item)) return;
+        using var cts = new CancellationTokenSource(grace);
+        try { await target.WriteAsync(item, cts.Token).ConfigureAwait(false); } catch (OperationCanceledException) { } catch (ChannelClosedException) { }
+    }
+
+    /// <summary>Forwards the queued results to the output, waiting for room; once ct is done the remaining results are dropped, except an error.</summary>
+    private static async Task PumpAsync<T>(ChannelReader<T> source, ChannelWriter<T> target, CancellationToken ct, Func<T, bool>? isError, TimeSpan grace)
     {
         bool dropping = false;
         while (await source.WaitToReadAsync().ConfigureAwait(false))
         {
             while (source.TryRead(out var item))
             {
+                if (isError is not null && isError(item)) { await DeliverErrorAsync(target, item, grace).ConfigureAwait(false); continue; }
                 if (dropping || target.TryWrite(item)) continue;
                 try
                 {
@@ -825,7 +852,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
 
     /// <summary>Go: rangeScanFromShard -- passes each record of the shard to onResult, with its secondary key when the scan uses an index, or the error of the scan.</summary>
     private async Task RangeScanFromShardAsync(CancellationToken ct, string minKeyInclusive, string maxKeyExclusive,
-        RangeScanOptions opts, long shardId, Action<GetResult, string?> onResult)
+        RangeScanOptions opts, long shardId, Func<GetResult, string?, ValueTask> onResult)
     {
         var request = new RangeScanRequest
         {
@@ -849,7 +876,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
         Exception? err = null;
         try
         {
-            await Executor.ExecuteRangeScan(retryCts.Token, request, response =>
+            async ValueTask<Exception?> Consume(RangeScanResponse response)
             {
                 if (request.EndInclusive && !response.EndInclusive)
                 {
@@ -862,10 +889,20 @@ internal sealed class AsyncClientImpl : IAsyncClient
                     {
                         record.Value = null;
                     }
-                    onResult(ProtoUtils.ToGetResult(record, "", null), record.SecondaryIndexKey);
+                    await onResult(ProtoUtils.ToGetResult(record, "", null), record.SecondaryIndexKey).ConfigureAwait(false);
                 }
                 return null;
-            }).ConfigureAwait(false);
+            }
+
+            if (Executor is IStreamingExecutor se)
+            {
+                await se.ExecuteRangeScan(retryCts.Token, request, Consume).ConfigureAwait(false);
+            }
+            else
+            {
+                // onResult completes synchronously on the eager (unbounded) path used with executors that cannot await
+                await Executor.ExecuteRangeScan(retryCts.Token, request, response => Consume(response).Result).ConfigureAwait(false);
+            }
         }
         catch (Exception e)
         {
@@ -877,7 +914,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
         }
         if (err is not null)
         {
-            onResult(new GetResult("", null, default, err), null);
+            await onResult(new GetResult("", null, default, err), null).ConfigureAwait(false);
         }
     }
 
@@ -887,6 +924,8 @@ internal sealed class AsyncClientImpl : IAsyncClient
         var outCh = Channel.CreateBounded<GetResult>(new BoundedChannelOptions(100) { FullMode = BoundedChannelFullMode.Wait });
         var opts = RangeScanOptions.Create(options);
         var writer = outCh.Writer;
+        bool streaming = Executor is IStreamingExecutor;
+        var grace = Options.RequestTimeout;
 
         if (opts.PartitionKey is not null)
         {
@@ -895,11 +934,16 @@ internal sealed class AsyncClientImpl : IAsyncClient
             StartStreamTask(async () =>
             {
                 var local = Channel.CreateUnbounded<GetResult>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
-                var pump = PumpAsync(local.Reader, writer, ct);
+                var pump = streaming ? Task.CompletedTask : PumpAsync(local.Reader, writer, ct, static r => r.Err is not null, grace);
                 try
                 {
-                    await RangeScanFromShardAsync(ct, minKeyInclusive, maxKeyExclusive, opts, shardId,
-                        (result, _) => local.Writer.TryWrite(result)).ConfigureAwait(false);
+                    await RangeScanFromShardAsync(ct, minKeyInclusive, maxKeyExclusive, opts, shardId, async (result, _) =>
+                    {
+                        if (!streaming) { local.Writer.TryWrite(result); return; }
+                        // Go: `outCh <- result`.  The caller's token only abandons the records; the error is always delivered.
+                        if (result.Err is not null) { await DeliverErrorAsync(writer, result, grace).ConfigureAwait(false); return; }
+                        try { await writer.WriteAsync(result, ct).ConfigureAwait(false); } catch (OperationCanceledException) { }
+                    }).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -913,7 +957,6 @@ internal sealed class AsyncClientImpl : IAsyncClient
         {
             // Do the scan on all shards and aggregate the responses
             var shardIds = ShardManager.GetAll();
-            var channels = new Channel<RangeScanResult>[shardIds.Length];
             var readers = new ChannelReader<RangeScanResult>[shardIds.Length];
             var shardTasks = new Task[shardIds.Length];
             var scanCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -922,15 +965,22 @@ internal sealed class AsyncClientImpl : IAsyncClient
             for (int i = 0; i < shardIds.Length; i++)
             {
                 long shardId = shardIds[i];
-                var ch = Channel.CreateUnbounded<RangeScanResult>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
-                channels[i] = ch;
+                // Go: an unbuffered channel per shard (the scan of a shard waits until the merge took its previous record)
+                var ch = streaming
+                    ? Channel.CreateBounded<RangeScanResult>(new BoundedChannelOptions(1) { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait })
+                    : Channel.CreateUnbounded<RangeScanResult>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
                 readers[i] = ch.Reader;
                 shardTasks[i] = StartStreamTask(async () =>
                 {
                     try
                     {
-                        await RangeScanFromShardAsync(scanToken, minKeyInclusive, maxKeyExclusive, opts, shardId,
-                            (result, secondaryIndexKey) => ch.Writer.TryWrite(new RangeScanResult(result, secondaryIndexKey))).ConfigureAwait(false);
+                        await RangeScanFromShardAsync(scanToken, minKeyInclusive, maxKeyExclusive, opts, shardId, async (result, secondaryIndexKey) =>
+                        {
+                            var item = new RangeScanResult(result, secondaryIndexKey);
+                            if (!streaming) { ch.Writer.TryWrite(item); return; }
+                            if (result.Err is not null) { await DeliverErrorAsync(ch.Writer, item, grace).ConfigureAwait(false); return; }
+                            try { await ch.Writer.WriteAsync(item, scanToken).ConfigureAwait(false); } catch (OperationCanceledException) { }
+                        }).ConfigureAwait(false);
                     }
                     finally
                     {
@@ -940,11 +990,15 @@ internal sealed class AsyncClientImpl : IAsyncClient
             }
 
             var order = GetKeyOrder();
+            // The merge gives up on an abandoned reader only `grace` after the token is done (not at once): the scans of the shards
+            // end with an error result when ct is done, and Go delivers it (aggregateAndSortRangeScanAcrossShards never looks at ctx)
+            var abandon = new CancellationTokenSource();
+            var abandonRegistration = ct.CanBeCanceled ? ct.Register(() => abandon.CancelAfter(grace)) : default;
             StartStreamTask(async () =>
             {
                 try
                 {
-                    await RangeScanMerger.AggregateAndSortRangeScanAcrossShardsAsync(order, readers, writer, ct).ConfigureAwait(false);
+                    await RangeScanMerger.AggregateAndSortRangeScanAcrossShardsAsync(order, readers, writer, abandon.Token).ConfigureAwait(false);
                 }
                 catch (Exception)
                 {
@@ -954,10 +1008,17 @@ internal sealed class AsyncClientImpl : IAsyncClient
                 {
                     writer.TryComplete();
 
-                    // The merge stops at the first error: cancel the scans of the other shards, and wait until they end
+                    // The merge stops at the first error: cancel the scans of the other shards, and drain the results they wait
+                    // to send until they end
                     scanCts.Cancel();
+                    foreach (var reader in readers)
+                    {
+                        try { while (await reader.WaitToReadAsync().ConfigureAwait(false)) { while (reader.TryRead(out _)) { } } } catch (Exception) { }
+                    }
                     try { await Task.WhenAll(shardTasks).ConfigureAwait(false); } catch (Exception) { /* the shard tasks do not throw */ }
                     scanCts.Dispose();
+                    abandonRegistration.Dispose();
+                    abandon.Dispose();
                 }
             });
         }
