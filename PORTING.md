@@ -37,6 +37,21 @@ allocation-budget tests (Release only), concurrency stress tests, and the reusab
 Run everything: `dotnet test tests/Oxia.Client.Tests -c Release` and `dotnet test tests/Oxia.Client.IntegrationTests -c Release`
 (add `OXIA_TEST_CLUSTER=1` for the cluster profile).
 
+## Upstream files deliberately NOT ported (client closure audit)
+
+Every non-test Go file under `oxia/` has a counterpart (see the component tables). From `common/`, only the client's closure was
+ported. Files left out, and why — check this list first when a sync diff touches them:
+
+| Upstream file(s) | Why not ported |
+|---|---|
+| `common/proto/*.pb.go`, `*_grpc.pb.go`, `*_vtproto.pb.go` (client/admin/metadata/replication/storage) | generated code. Replaced by protoc output (Grpc.Tools, namespace `Io.Oxia.Proto.V1`) for admin/metadata/replication, and by the hand-written `Oxia.Common.Proto` messages + codecs for the client protocol (verified byte-for-byte against both protoc and the real Go vtproto) |
+| `common/proto/{metadata_ext,metadata_ext_annotations}.go`, `storage.proto` | helpers/types for the coordinator and data-server metadata; no client code path |
+| `common/proto/compat/*` | legacy `io.streamnative.oxia.proto` service names served by the server for old clients |
+| `common/concurrent/{callback,callback_adaptor,condition,once,batcher}.go` | not used by the client |
+| `common/{cache,commonio,codec,entity,metric,object,process,validation}`, `must.go` | server/CLI infrastructure (`metric` is replaced by `System.Diagnostics.Metrics`; `process.DoWithLabels` pprof labels have no .NET analogue) |
+| `common/rpc/grpcmetrics` server half, `common/security` server half | server side (client halves are ported; the server TLS conversion is ported only because tests host TLS servers) |
+| `common/failpoint/*_disable*.go` | the `disable_trap` build flavour does not exist here (its 3 tests are `Skip`ped with that reason) |
+
 ## Component tables
 
 (aggregated here by the lead after each merge; see the individual files)
