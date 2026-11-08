@@ -194,9 +194,9 @@ public class AsyncClientImplExtraTests
         var value = V;
 
         // The tiered JIT needs a few rounds (with pauses: its call counting starts after a quiet period) before the hot
-        // methods are optimised; unoptimised code allocates things the optimised one does not. Take the best of the rounds.
+        // methods are optimised; unoptimised code allocates things the optimised one does not. Take the best of the rounds, until the budgets are met (at most 60 rounds).
         long putBytes = long.MaxValue, getBytes = long.MaxValue, deleteBytes = long.MaxValue;
-        for (int round = 0; round < 12; round++)
+        for (int round = 0; round < 60; round++)
         {
             for (int i = 0; i < 20_000; i++)
             {
@@ -217,6 +217,9 @@ public class AsyncClientImplExtraTests
             before = GC.GetAllocatedBytesForCurrentThread();
             for (int i = 0; i < 1_000; i++) await client.DeleteAsync("key");
             deleteBytes = Math.Min(deleteBytes, (GC.GetAllocatedBytesForCurrentThread() - before) / 1000);
+
+            // (under load the background JIT can take many rounds: stop as soon as the budgets are met)
+            if (putBytes <= 128 && getBytes <= 176 && deleteBytes <= 0) break;
         }
 
         // The answering batcher itself allocates the response objects of the fake server (put: PutResponse + ProtoVersion,

@@ -24,6 +24,10 @@ Upstream: `github.com/oxia-db/oxia` @ `8456f61e1ada7b786f5ef17798b45fbc17d0d246`
 | `oxia/sync_client_impl_test.go` | `tests/Oxia.Client.Tests/SyncClientImplTests.cs` | 5 | 5 | 0 | two tests run the whole client (D, E, A, B, C) against `LeaderServer` (mock `OxiaClientBase` on `TestGrpcServer`) |
 | `oxia/admin_client_impl_test.go` | `tests/Oxia.Client.Tests/AdminClientImplTests.cs` | 21 | 21 | 0 | pure fakes (subclass of the generated `OxiaAdminClient`, fake `IClientPool`); needs B's `OxiaErrors.FromGrpcError/GrpcCode/IntoGrpcStatusError` |
 | `oxia/admin_errors_test.go` | `tests/Oxia.Client.Tests/AdminErrorsTests.cs` | 2 | 2 | 0 | |
+| (extra, no upstream) | `tests/Oxia.Client.Tests/AsyncClientImpl.Extra.cs` | — | — | — | pooled calls reused / reset, idempotent `Complete`, completion from other threads (40k mixed ops), 10k pipelined puts, lone-surrogate key validation, `GetSequenceUpdates` needs a partition key, invalid put options, delete-range without shards, and the **allocation budget** of Put/Get/Delete (Release only; skipped in Debug) |
+
+Totals: 61 Go tests (counting each `t.Run`/table case as part of its parent) ported as 61 test methods (109 xUnit cases with the theory rows and the extras);
+all pass (Debug and Release) when run together with the merged components A–E, F1.
 
 Fakes shared by the tests: `tests/Oxia.Client.Tests/Fakes/*.Extra.cs`, namespace `Oxia.Client.Tests.F2` (the Go tests share unexported
 helpers across files — `staticShardManager`, `sessionRequestsServer`, … — and other components port the same names; a private namespace avoids
@@ -58,6 +62,9 @@ puts/gets/deletes to ~0 B/op end to end.
   bounded channel the way Go's blocking `ch <- result` does: List/RangeScan buffer per shard in an unbounded queue and forward to the bounded output
   channel with a pump. The stream is therefore read eagerly (no back-pressure from a slow reader to gRPC). An async-consumer overload
   (`Func<…, ValueTask<Exception?>>`) in `IExecutor` would restore the Go behaviour.
-* `IWriteManager`-style `Action<long, object> forward` is synchronous too: the forwarded add is fire-and-observe (a failure to enqueue fails the call).
+* `WriteManager` is given the awaiting `Func<long, object, ValueTask>` forwarder (`ForwardWriteAsync`: the routing and the "invalid call" failure are
+  synchronous, the add to the successors is awaited, a failure to add fails the call); `HandOff` (used by the write rerouter) is synchronous in D, and the
+  `ReadRerouter` / ephemeral-put / multi-shard paths use fire-and-observe adds (a failure to enqueue fails the call).
+* Calls are mutable classes that a batch writes `OpIndex` into: a delete range re-routed to several successors is cloned per successor with `DeleteRangeCall.Clone()`.
 * `admin.proto` is generated `GrpcServices="Client"`: there is no `OxiaAdmin.OxiaAdminBase`, so no mock admin *server* can be hosted by `TestGrpcServer`
   (the Go admin test does not host one either: it mocks the client interface).
