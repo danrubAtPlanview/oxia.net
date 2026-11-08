@@ -19,6 +19,10 @@ internal static class Tuning
             string value = eq < 0 ? "true" : item[(eq + 1)..];
             switch (name)
             {
+                case "hrtimer":
+                    // must be set before the first batcher with a linger exists (the service is process wide): use one run per process
+                    Oxia.Client.Batch.LingerTimerService.UseHighResolutionTimer = bool.Parse(value);
+                    break;
                 default:
                     throw new ArgumentException($"unknown tuning knob '{name}'");
             }

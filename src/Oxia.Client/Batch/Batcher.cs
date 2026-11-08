@@ -19,14 +19,15 @@
 //        ChannelClosedException -> they fail their call) and only THEN raises the `_closing` flag the loop polls.  So when
 //        the loop sees the flag (or sees the completed, empty channel) no call can be enqueued anymore and draining the
 //        queue is race free -- the same guarantee `<-b.addsDone` gives in Go.
-//      * The linger timer is ONE reusable System.Threading.Timer per batcher that is only a WAKE-UP HINT for an idle loop:
-//        the deadline of the open batch is a Stopwatch timestamp the loop compares with the clock itself, so a stale or
-//        early timer tick is harmless (it re-arms).  The timer is armed lazily -- only when the loop is idle with an open
+//      * The linger timer is ONE reusable LingerTimer (BatcherTimer.cs) per batcher that is only a WAKE-UP HINT for an idle
+//        loop: the deadline of the open batch is a Stopwatch timestamp the loop compares with the clock itself, so a stale
+//        or early timer tick is harmless (it re-arms).  The timer is armed lazily -- only when the loop is idle with an open
 //        batch and no earlier arming is still pending -- hence a loop that is saturated (batches complete by size) never
 //        touches the timer, and nothing is allocated per batch (no Task.Delay, no CancellationTokenSource, no exception).
 //        The tick is delivered by a sentinel object written with TryWrite (dropped when the queue is full: then the loop
-//        is not idle and checks the deadline on its own).  Timer granularity is 1 ms (Go: ns): a sub-millisecond linger
-//        rounds up to 1 ms.
+//        is not idle and checks the deadline on its own).  The wake-up service waits on a HIGH RESOLUTION timer on Windows
+//        (System.Threading.Timer has the 15.6 ms OS tick there: a 5 ms linger became ~15 ms, see BatcherTimer.cs), so a
+//        linger is honoured to ~0.5 ms (Go: ns) on every platform.
 //      * `select` between callC / timeout / closeC is a sequential check order (closing first, then queue, then deadline);
 //        Go's select picks randomly between ready cases, so any order is a legal Go schedule.
 //      * Batches may implement IRecyclableBatch: the loop gives them back once they were completed or failed.
@@ -62,7 +63,7 @@ internal sealed class BatcherImpl : IBatcher
     private readonly ChannelWriter<object> _writer;
     private readonly long _lingerTicks;
     private readonly int _maxRequestsPerBatch;
-    private readonly Timer? _timer;
+    private readonly LingerTimer? _timer;
     private readonly ILogger _log;
 
     /// <summary>1 once Dispose() completed the channel (set AFTER TryComplete, see the header).</summary>
@@ -93,7 +94,7 @@ internal sealed class BatcherImpl : IBatcher
         if (linger > TimeSpan.Zero)
         {
             _lingerTicks = Math.Max(1, (long)(linger.TotalSeconds * Stopwatch.Frequency));
-            _timer = new Timer(static state => ((BatcherImpl)state!).OnTimer(), this, Timeout.Infinite, Timeout.Infinite);
+            _timer = new LingerTimer(static state => ((BatcherImpl)state!).OnTimer(), this);
         }
     }
 
@@ -190,7 +191,7 @@ internal sealed class BatcherImpl : IBatcher
         }
         finally
         {
-            _timer?.Dispose();
+            _timer?.Cancel();
             _done.TrySetResult();
         }
     }
@@ -217,7 +218,7 @@ internal sealed class BatcherImpl : IBatcher
                         batch = null;
                         continue;
                     }
-                    ArmTimer(remaining);
+                    ArmTimer(deadline);
                 }
 
                 if (!await reader.WaitToReadAsync().ConfigureAwait(false)) break; // closed and empty
@@ -339,13 +340,12 @@ internal sealed class BatcherImpl : IBatcher
     // Linger timer
     // -----------------------------------------------------------------------------------------------------------------
 
-    private void ArmTimer(long remainingTicks)
+    private void ArmTimer(long deadline)
     {
         // An earlier arming that is still outstanding fires no later than this one needs (deadlines only grow).
         if (_timer is null || Interlocked.CompareExchange(ref _timerPending, 1, 0) != 0) return;
 
-        long ms = (remainingTicks * 1000 + Stopwatch.Frequency - 1) / Stopwatch.Frequency; // round up
-        _timer.Change(Math.Clamp(ms, 1, uint.MaxValue - 1), Timeout.Infinite);
+        _timer.Arm(deadline);
     }
 
     private void OnTimer()
