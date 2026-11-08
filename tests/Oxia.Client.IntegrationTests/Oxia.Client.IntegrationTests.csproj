@@ -1,4 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <!-- Port of tests/client, tests/sequence, tests/resolver, tests/assignments of github.com/oxia-db/oxia: the client against a
+       real Oxia server.  The server is the reusable Docker fixture of Oxia.TestSupport (see README.md). -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <IsPackable>false</IsPackable>
@@ -14,5 +16,9 @@
     <ProjectReference Include="..\..\src\Oxia.Common\Oxia.Common.csproj" />
     <ProjectReference Include="..\..\src\Oxia.Client\Oxia.Client.csproj" />
     <ProjectReference Include="..\Oxia.TestSupport\Oxia.TestSupport.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="README.md" />
   </ItemGroup>
 </Project>
