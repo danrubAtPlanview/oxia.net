@@ -30,13 +30,17 @@
 //      * NewRpcProvider(ctx, ns, tls, auth, addr, supplier, dialOptions...) is RpcProvider.Create; the constructor takes the
 //        IClientPool (tests wrap it) and the failpoints (Go: the unexported newRpcProvider).
 //      * Close also cancels the write streams still open (Go leaves them to die with the closed connections).
-//      * The shard-request first attempt runs inline: only a failed attempt allocates the retry machinery (timer, backoff,
-//        closures); the Go code always sets it up.  The observable behaviour is the same -- the failed first attempt is handed to
-//        the very same retry loop.
+//      * The first attempt of a write / read runs inline: only a failed attempt allocates the retry machinery (timer, backoff,
+//        closures -- kept in separate methods so that the fast path does not even allocate the closure object); the Go code always
+//        sets it up.  The observable behaviour is the same -- the failed first attempt is handed to the very same retry loop
+//        (the loop's first operation rethrows it), with the shard-map task of that attempt.  ExecuteWrite / ExecuteRead use the
+//        pooling async method builder: a request that completes asynchronously reuses a pooled state machine box.  Measured
+//        (benchmarks/.../RpcProviderBenchmarks.cs): ExecuteRead 0 B beyond the stream object, ExecuteWrite one future per request.
 //      * ExecuteRead returns the response of the stream as is when the server sent a single one (no copy).
 // =====================================================================================================================
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Net.Security;
 using Grpc.Core;
@@ -145,6 +149,7 @@ public sealed class RpcProvider : IRpcProvider
 
     // ----- shard requests -------------------------------------------------------------------------------------------
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<WriteResponse> ExecuteWrite(CancellationToken ct, long shardId, Func<WriteRequest> prepare)
     {
         // The first attempt runs inline: only a failed one pays for the retry machinery.
@@ -152,18 +157,26 @@ public sealed class RpcProvider : IRpcProvider
         Exception failure;
         try
         {
-            return await WriteAttempt(ct, shardId, prepare, null).ConfigureAwait(false);
+            string target = GetTargetByShard(shardId, null);
+            var sw = TryGetWriteStream(shardId, target) ?? await NewWriteStream(ct, shardId, target).ConfigureAwait(false);
+            return await sw.Send(ct, prepare).ConfigureAwait(false);
         }
         catch (Exception e)
         {
             failure = e;
         }
 
+        return await RetryWrite(ct, shardId, prepare, failure, changed).ConfigureAwait(false);
+    }
+
+    /// <summary>The write loop after its first attempt failed (a separate method: its closure must not be allocated by the fast path).</summary>
+    private ValueTask<WriteResponse> RetryWrite(CancellationToken ct, long shardId, Func<WriteRequest> prepare, Exception failure, Task? changed)
+    {
         // A change of the shard map ends the wait for the next attempt: once a shard is split, the other shards hold their writes
         // until the batches pending on it are rerouted.
         var timer = new ShardMapTimer { Changed = changed };
         bool first = true;
-        return await ExecuteWithRetryTimer(ct, timer, hint =>
+        return ExecuteWithRetryTimer(ct, timer, hint =>
         {
             if (first)
             {
@@ -173,9 +186,10 @@ public sealed class RpcProvider : IRpcProvider
 
             timer.Changed = ShardMapChanged();
             return WriteAttempt(ct, shardId, prepare, hint);
-        }, IsRetryableShardRequestFunc).ConfigureAwait(false);
+        }, IsRetryableShardRequestFunc);
     }
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<WriteResponse> WriteAttempt(CancellationToken ct, long shardId, Func<WriteRequest> prepare, ErrorMetadata? hint)
     {
         string target = GetTargetByShard(shardId, hint);
@@ -183,6 +197,7 @@ public sealed class RpcProvider : IRpcProvider
         return await sw.Send(ct, prepare).ConfigureAwait(false);
     }
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<ReadResponse> ExecuteRead(CancellationToken ct, ReadRequest request)
     {
         // The first attempt runs inline: only a failed one pays for the retry machinery.
@@ -196,8 +211,14 @@ public sealed class RpcProvider : IRpcProvider
             failure = e;
         }
 
+        return await RetryRead(ct, request, failure).ConfigureAwait(false);
+    }
+
+    /// <summary>The read loop after its first attempt failed (a separate method: its closure must not be allocated by the fast path).</summary>
+    private ValueTask<ReadResponse> RetryRead(CancellationToken ct, ReadRequest request, Exception failure)
+    {
         bool first = true;
-        return await ExecuteWithRetry(ct, hint =>
+        return ExecuteWithRetry(ct, hint =>
         {
             if (first)
             {
@@ -206,9 +227,10 @@ public sealed class RpcProvider : IRpcProvider
             }
 
             return ReadAttempt(ct, request, hint);
-        }, IsRetryableShardRequestFunc).ConfigureAwait(false);
+        }, IsRetryableShardRequestFunc);
     }
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<ReadResponse> ReadAttempt(CancellationToken ct, ReadRequest request, ErrorMetadata? hint)
     {
         string target = GetTargetByShard(request.Shard, hint);
@@ -275,15 +297,11 @@ public sealed class RpcProvider : IRpcProvider
     /// shard if that one failed, or if it goes to another target: a leader that was replaced, but is still reachable, keeps the
     /// stream open without applying the writes anymore.
     /// </summary>
-    private ValueTask<StreamWrapper> GetWriteStream(CancellationToken ct, long shardId, string target)
-    {
-        if (_writeStreams.TryGetValue(shardId, out var sw) && !sw.Failed && string.Equals(sw.Target, target, StringComparison.Ordinal))
-        {
-            return new ValueTask<StreamWrapper>(sw);
-        }
+    private ValueTask<StreamWrapper> GetWriteStream(CancellationToken ct, long shardId, string target) =>
+        TryGetWriteStream(shardId, target) is { } sw ? new ValueTask<StreamWrapper>(sw) : NewWriteStream(ct, shardId, target);
 
-        return NewWriteStream(ct, shardId, target);
-    }
+    private StreamWrapper? TryGetWriteStream(long shardId, string target) =>
+        _writeStreams.TryGetValue(shardId, out var sw) && !sw.Failed && string.Equals(sw.Target, target, StringComparison.Ordinal) ? sw : null;
 
     private async ValueTask<StreamWrapper> NewWriteStream(CancellationToken ct, long shardId, string target)
     {

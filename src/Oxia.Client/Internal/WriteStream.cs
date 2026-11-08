@@ -22,10 +22,17 @@
 //        first send also connects).  If that token fires before SendAsync completes, the state of the HTTP/2 stream is unknown:
 //        the wrapper is marked Failed and the stream is cancelled, so a request that missed its deadline is never delivered
 //        afterwards (Go gets the same effect by cancelling the stream context when the request ends during the stream setup).
+//        The failure that interrupted the send is surfaced as OperationCanceledException(token) (Go returns ctx.Err()), the
+//        transport's own "call canceled" status stays as its inner exception.
+//      * Once the receive loop ended (and drained the queue) a Send fails with a retryable EOF instead of queueing a future that no
+//        one would complete; Go gets the same from gRPC (Send on an ended stream returns io.EOF).
+//      * Send is an async ValueTask method on the pooling method builder (no state machine allocation per request); the future
+//        of each request is the only allocation left (futures are not reused: an abandoned request leaves its future in the queue).
 //      * A response without a pending request (a protocol violation; Go panics with an index out of range) fails the stream.
 //      * A null from RecvAsync is Go's io.EOF: it fails the pending futures with OxiaErrors.EndOfStream (retryable).
 //      * The debug line logs the sizes of the response (Go logs the protobuf text); it is only built when Debug is enabled.
 // =====================================================================================================================
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
 using Oxia.Common.Concurrent;
 using Oxia.Common.Constant;
@@ -49,6 +56,7 @@ internal sealed class StreamWrapper
     private int _head;
     private int _count;
     private volatile bool _failed;
+    private bool _ended; // guarded by _queueLock: the receive loop drained the queue and will not serve another request
 
     /// <summary>The shard leader the stream goes to.</summary>
     public string Target { get; }
@@ -84,6 +92,7 @@ internal sealed class StreamWrapper
     /// Hands the request returned by <paramref name="prepare"/> to gRPC, and waits for its response.  prepare is invoked
     /// right before, unless <paramref name="ct"/> is done: a request is never sent after its deadline.
     /// </summary>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<WriteResponse> Send(CancellationToken ct, Func<WriteRequest> prepare)
     {
         ct.ThrowIfCancellationRequested();
@@ -94,7 +103,13 @@ internal sealed class StreamWrapper
         await _sendLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            lock (_queueLock) Enqueue(f);
+            lock (_queueLock)
+            {
+                // The receive loop already ended and failed the requests it knew of: nobody would complete this one.  Go gets the
+                // same from gRPC, whose Send on an ended stream returns io.EOF (retried on a new stream).
+                if (_ended) throw OxiaErrors.ToThrowable(OxiaErrors.EndOfStream);
+                Enqueue(f);
+            }
 
             try
             {
@@ -171,7 +186,12 @@ internal sealed class StreamWrapper
                 // Before failing the requests, so that their retries use a new stream
                 _failed = true;
                 Future<WriteResponse>[] pending;
-                lock (_queueLock) pending = DrainAll();
+                lock (_queueLock)
+                {
+                    _ended = true;
+                    pending = DrainAll();
+                }
+
                 foreach (var f in pending) f.Fail(err);
                 return;
             }
