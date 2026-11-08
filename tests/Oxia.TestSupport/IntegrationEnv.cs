@@ -17,6 +17,7 @@ public static class IntegrationEnv
     public const string CleanupVar = "OXIA_TEST_CLEANUP";
     public const string ClusterVar = "OXIA_TEST_CLUSTER";
     public const string SlotsVar = "OXIA_TEST_SLOTS";
+    public const string ClusterSlotsVar = "OXIA_TEST_CLUSTER_SLOTS";
     public const string InstanceVar = "OXIA_TEST_INSTANCE";
     public const string MemoryVar = "OXIA_TEST_MEMORY";
     public const string CpusVar = "OXIA_TEST_CPUS";
@@ -40,6 +41,9 @@ public static class IntegrationEnv
 
     /// <summary>OXIA_TEST_SLOTS: how many standalone servers may run concurrently inside the container (default 8).</summary>
     public static int Slots => int.TryParse(Get(SlotsVar), out var n) && n is > 0 and <= 64 ? n : DefaultSlots;
+
+    /// <summary>OXIA_TEST_CLUSTER_SLOTS: how many clusters (coordinator + up to 3 servers each) may run concurrently (default 2).</summary>
+    public static int ClusterSlots => int.TryParse(Get(ClusterSlotsVar), out var n) && n is > 0 and <= 16 ? n : 2;
 
     /// <summary>OXIA_TEST_INSTANCE: suffix of the container name, to run several isolated fixtures side by side.</summary>
     public static string? Instance => Get(InstanceVar);

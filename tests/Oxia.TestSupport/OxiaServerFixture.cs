@@ -8,7 +8,7 @@
 //   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
 //   Intent   : The .NET replacement for "start an in-process server": ONE reusable Docker container (named after a hash of
 //              image+settings, labelled oxia.net.tests=1, created lazily, kept after the run so the next run reuses it) that
-//              hosts a pool of "slots".  A slot is a port pair plus a directory on the container's tmpfs; StartAsync(profile)
+//              hosts a pool of "slots".  A slot is a port plus a directory on the container's tmpfs; StartAsync(profile)
 //              leases a slot and launches `oxia standalone <profile flags>` in it (docker exec), so every test gets a FRESH,
 //              EMPTY server with exactly the configuration the Go test sets (shards, key sorting, notifications, retention)
 //              -- the same isolation as Go -- without creating a container per test.  Closing the server kills the process
@@ -17,13 +17,11 @@
 //              Because a standalone server answers shard assignments with the :authority the client used, a published
 //              ephemeral host port (docker `-p 127.0.0.1::<port>`) is all that is needed: the leader address the client
 //              receives is the address it already reaches.  OXIA_TEST_ADDRESS bypasses Docker for an external server.
-//   Divergences: see tests/Oxia.Client.IntegrationTests/README.md ("Why not one container per profile").
+//   Divergences: see tests/Oxia.Client.IntegrationTests/README.md ("Why one container with slots instead of a container per profile").
 // =====================================================================================================================
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.RegularExpressions;
 using Oxia.TestSupport.Docker;
 using Xunit;
@@ -85,20 +83,18 @@ public sealed class OxiaServer : IAsyncDisposable
 /// </summary>
 public sealed class OxiaServerFixture : IAsyncLifetime
 {
-    public const string ContainerLabel = "oxia.net.tests";
     private const string ScriptVersion = "v1";
     private const int BaseContainerPort = 6648;
     private const int BaseMetricsPort = 7648;
     private static readonly Regex AnsiColors = new("\u001b\\[[0-9;]*m", RegexOptions.Compiled);
-    private static readonly Regex PortLine = new(@"^(\d+)/tcp -> .*:(\d+)\s*$", RegexOptions.Compiled | RegexOptions.Multiline);
 
     private readonly int _slots = IntegrationEnv.Slots;
     private readonly SemaphoreSlim _gate;
     private readonly bool[] _busy;
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private readonly ConcurrentQueue<string> _events = new();
-    private readonly string _owner = $"{Environment.ProcessId}:{Environment.MachineName}:{Process.GetCurrentProcess().StartTime.Ticks}";
-    private ContainerInfo? _container;
+    private readonly string _owner = ProcessOwner.Id;
+    private ReusableContainer? _container;
     private bool _externalVerified;
 
     public OxiaServerFixture()
@@ -124,7 +120,7 @@ public sealed class OxiaServerFixture : IAsyncLifetime
     {
         if (IsExternal) return null;
         var c = await EnsureContainerAsync(ct).ConfigureAwait(false);
-        var r = await DockerCli.RunAsync(["exec", c.Name, "oxia", "--version"], null, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+        var r = await c.ExecAsync(["oxia", "--version"], null, ct).ConfigureAwait(false);
         return r.Ok ? r.StdOut.Replace("\r", "").Trim() : r.Combined;
     }
 
@@ -135,7 +131,7 @@ public sealed class OxiaServerFixture : IAsyncLifetime
         if (_container is { } c && IntegrationEnv.Cleanup)
         {
             Log($"OXIA_TEST_CLEANUP: removing container {c.Name}");
-            var r = await DockerCli.RunAsync(["rm", "-f", c.Name]).ConfigureAwait(false);
+            var r = await c.RemoveAsync().ConfigureAwait(false);
             if (!r.Ok) Log("docker rm failed: " + r.Combined);
         }
     }
@@ -149,7 +145,7 @@ public sealed class OxiaServerFixture : IAsyncLifetime
         profile ??= OxiaServerProfile.Default;
         if (IntegrationEnv.ExternalAddress is { } external) return await StartExternalAsync(external, profile, ct).ConfigureAwait(false);
 
-        ContainerInfo container;
+        ReusableContainer container;
         try
         {
             container = await EnsureContainerAsync(ct).ConfigureAwait(false);
@@ -209,25 +205,20 @@ public sealed class OxiaServerFixture : IAsyncLifetime
     // Container management
     // ------------------------------------------------------------------------------------------------------------------
 
-    private sealed record ContainerInfo(string Name, IReadOnlyDictionary<int, int> HostPorts, bool Reused);
-
     /// <summary>The container name: <c>oxia-net-tests-&lt;hash of image+settings&gt;[-&lt;OXIA_TEST_INSTANCE&gt;]</c>.</summary>
-    public static string ComputeContainerName()
-    {
-        var material = string.Join('|', ScriptVersion, IntegrationEnv.Image, IntegrationEnv.Slots, IntegrationEnv.Memory, IntegrationEnv.Cpus ?? "-");
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material)))[..10].ToLowerInvariant();
-        return "oxia-net-tests-" + hash + (IntegrationEnv.Instance is { } i ? "-" + SanitizeName(i) : "");
-    }
+    public static string ComputeContainerName() => ReusableContainer.ComputeName("tests", HashMaterial());
 
-    private static string SanitizeName(string s) => Regex.Replace(s, "[^A-Za-z0-9_.-]", "-");
+    private static string HashMaterial() =>
+        string.Join('|', ScriptVersion, IntegrationEnv.Image, IntegrationEnv.Slots, IntegrationEnv.Memory, IntegrationEnv.Cpus ?? "-");
 
-    private async Task<ContainerInfo> EnsureContainerAsync(CancellationToken ct)
+    private async Task<ReusableContainer> EnsureContainerAsync(CancellationToken ct)
     {
         if (_container is not null) return _container;
         await _initLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            return _container ??= await EnsureContainerCoreAsync(ct).ConfigureAwait(false);
+            return _container ??= await ReusableContainer.EnsureAsync("tests", HashMaterial(),
+                Enumerable.Range(0, _slots).Select(i => BaseContainerPort + i).ToList(), Log, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -235,148 +226,11 @@ public sealed class OxiaServerFixture : IAsyncLifetime
         }
     }
 
-    private async Task<ContainerInfo> EnsureContainerCoreAsync(CancellationToken ct)
-    {
-        var sw = Stopwatch.StartNew();
-        var (available, detail) = await DockerCli.ProbeAsync(ct).ConfigureAwait(false);
-        if (!available)
-        {
-            throw new DockerException($"Docker is not available ({detail}). Install/start Docker, or point {IntegrationEnv.AddressVar} " +
-                                      $"at an externally started `oxia standalone`. Set {IntegrationEnv.SkipIfNoServerVar}=1 to skip instead of fail.");
-        }
-
-        var name = ComputeContainerName();
-        var image = IntegrationEnv.Image;
-        for (var attempt = 0; attempt < 5; attempt++)
-        {
-            var state = await InspectAsync(name, ct).ConfigureAwait(false);
-            bool reused;
-            switch (state)
-            {
-                case null:
-                    await EnsureImageAsync(image, ct).ConfigureAwait(false);
-                    var run = await DockerCli.RunAsync(BuildRunArgs(name, image), null, TimeSpan.FromMinutes(2), ct).ConfigureAwait(false);
-                    if (!run.Ok)
-                    {
-                        if (run.Combined.Contains("is already in use", StringComparison.OrdinalIgnoreCase)) continue; // another run created it
-                        throw new DockerException($"docker run failed: {run.Combined}");
-                    }
-
-                    reused = false;
-                    Log($"created container {name} from {image}");
-                    var version = await DockerCli.RunAsync(["exec", name, "oxia", "--version"], null, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
-                    Log("server: " + version.StdOut.Replace(Environment.NewLine, " ").Replace("\n", " ").Trim());
-                    break;
-                case "running":
-                    reused = true;
-                    Log($"reusing running container {name}");
-                    break;
-                case "paused":
-                    await DockerCli.RunCheckedAsync(["unpause", name], null, null, ct).ConfigureAwait(false);
-                    reused = true;
-                    Log($"unpaused container {name}");
-                    break;
-                case "exited" or "created":
-                    await DockerCli.RunCheckedAsync(["start", name], null, null, ct).ConfigureAwait(false);
-                    reused = true;
-                    Log($"started stopped container {name}");
-                    break;
-                default: // dead, removing, restarting...: start over
-                    Log($"container {name} is '{state}': recreating");
-                    await DockerCli.RunAsync(["rm", "-f", name], null, null, ct).ConfigureAwait(false);
-                    continue;
-            }
-
-            var ports = await ReadPortsAsync(name, ct).ConfigureAwait(false);
-            if (Enumerable.Range(0, _slots).Any(i => !ports.ContainsKey(BaseContainerPort + i)))
-            {
-                throw new DockerException($"container {name} does not publish the expected ports (found: {string.Join(',', ports.Keys)}); " +
-                                          $"remove it (scripts/clean-oxia-containers.ps1) and retry");
-            }
-
-            Log($"container {name} ready in {sw.ElapsedMilliseconds} ms (reused={reused}); host ports {ports.Values.Min()}..{ports.Values.Max()}");
-            return new ContainerInfo(name, ports, reused);
-        }
-
-        throw new DockerException($"could not create or reuse container {name}");
-    }
-
-    /// <summary>State of the container (<c>running</c>, <c>exited</c>, ...) or null if it does not exist; refuses foreign containers.</summary>
-    private static async Task<string?> InspectAsync(string name, CancellationToken ct)
-    {
-        var r = await DockerCli.RunAsync(["inspect", "-f", "{{.State.Status}}|{{index .Config.Labels \"" + ContainerLabel + "\"}}", name],
-            null, null, ct).ConfigureAwait(false);
-        if (!r.Ok) return null;
-        var parts = r.StdOut.Trim().Split('|');
-        if (parts.Length < 2 || parts[1] != "1")
-        {
-            throw new DockerException($"a container named {name} exists but is not labelled {ContainerLabel}=1; refusing to touch it");
-        }
-
-        return parts[0];
-    }
-
-    private static async Task EnsureImageAsync(string image, CancellationToken ct)
-    {
-        var r = await DockerCli.RunAsync(["image", "inspect", image], null, null, ct).ConfigureAwait(false);
-        if (r.Ok) return;
-        var sw = Stopwatch.StartNew();
-        await DockerCli.RunCheckedAsync(["pull", image], null, TimeSpan.FromMinutes(10), ct).ConfigureAwait(false);
-        Console.Error.WriteLine($"[oxia-fixture] pulled {image} in {sw.Elapsed.TotalSeconds:0.#} s");
-    }
-
-    private List<string> BuildRunArgs(string name, string image)
-    {
-        var args = new List<string>
-        {
-            "run", "-d", "--init", "--name", name,
-            "--label", ContainerLabel + "=1",
-            "--label", "oxia.net.tests.image=" + image,
-            "--label", "oxia.net.tests.created=" + DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture),
-            "--memory", IntegrationEnv.Memory,
-            "--tmpfs", "/data:rw,size=1g",
-        };
-        if (IntegrationEnv.Cpus is { } cpus)
-        {
-            args.Add("--cpus");
-            args.Add(cpus);
-        }
-
-        for (var i = 0; i < _slots; i++)
-        {
-            // ephemeral host port on loopback only: collision free, and the server echoes whatever authority the client used
-            args.Add("-p");
-            args.Add($"127.0.0.1::{BaseContainerPort + i}");
-        }
-
-        args.AddRange(["--entrypoint", "tail", image, "-f", "/dev/null"]);
-        return args;
-    }
-
-    private static async Task<Dictionary<int, int>> ReadPortsAsync(string name, CancellationToken ct)
-    {
-        var map = new Dictionary<int, int>();
-        // `docker port` can briefly return nothing right after start on Docker Desktop: retry a few times
-        for (var i = 0; i < 20; i++)
-        {
-            var output = await DockerCli.RunCheckedAsync(["port", name], null, null, ct).ConfigureAwait(false);
-            foreach (Match m in PortLine.Matches(output))
-            {
-                map[int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture)] = int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
-            }
-
-            if (map.Count > 0) return map;
-            await Task.Delay(100, ct).ConfigureAwait(false);
-        }
-
-        return map;
-    }
-
     // ------------------------------------------------------------------------------------------------------------------
     // Slots
     // ------------------------------------------------------------------------------------------------------------------
 
-    private async Task<int> LockAndStartAsync(ContainerInfo container, OxiaServerProfile profile, CancellationToken ct)
+    private async Task<int> LockAndStartAsync(ReusableContainer container, OxiaServerProfile profile, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromMinutes(5);
         var first = Random.Shared.Next(_slots);
@@ -396,13 +250,12 @@ public sealed class OxiaServerFixture : IAsyncLifetime
                 {
                     var args = new List<string>
                     {
-                        "exec", "-i", container.Name, "sh", "-s", "--",
                         slot.ToString(CultureInfo.InvariantCulture), _owner,
                         (BaseContainerPort + slot).ToString(CultureInfo.InvariantCulture),
                         (BaseMetricsPort + slot).ToString(CultureInfo.InvariantCulture),
                     };
                     args.AddRange(profile.ToFlags());
-                    var r = await DockerCli.RunAsync(args, SlotScripts.Acquire, TimeSpan.FromSeconds(60), ct).ConfigureAwait(false);
+                    var r = await container.ExecScriptAsync(SlotScripts.Acquire, args, TimeSpan.FromSeconds(60), ct).ConfigureAwait(false);
                     if (r.ExitCode == 0 && r.StdOut.StartsWith("OK", StringComparison.Ordinal))
                     {
                         started = true;
@@ -433,45 +286,23 @@ public sealed class OxiaServerFixture : IAsyncLifetime
     }
 
     /// <summary>If the lock is held by a test process on this machine that no longer exists, removes it.</summary>
-    private async Task ReclaimIfStaleAsync(ContainerInfo container, int slot, string lockedOutput, CancellationToken ct)
+    private async Task ReclaimIfStaleAsync(ReusableContainer container, int slot, string lockedOutput, CancellationToken ct)
     {
-        // "LOCKED <pid>:<machine>:<starttime ticks>"
-        var owner = lockedOutput.Trim();
-        if (owner.StartsWith("LOCKED", StringComparison.Ordinal)) owner = owner[6..].Trim();
-        var parts = owner.Split(':');
-        if (parts.Length != 3 || parts[1] != Environment.MachineName || !int.TryParse(parts[0], out var pid)) return;
-        var alive = false;
-        try
-        {
-            using var p = Process.GetProcessById(pid);
-            alive = !p.HasExited && p.StartTime.Ticks.ToString(CultureInfo.InvariantCulture) == parts[2];
-        }
-        catch (ArgumentException)
-        {
-            // no such process
-        }
-        catch (InvalidOperationException)
-        {
-            // exited meanwhile
-        }
-
-        if (alive) return;
-        Log($"slot {slot}: removing stale lock of dead test process {pid}");
-        await DockerCli.RunAsync(["exec", "-i", container.Name, "sh", "-s", "--", slot.ToString(CultureInfo.InvariantCulture)],
-            SlotScripts.Release, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+        if (ProcessOwner.IsAlive(lockedOutput)) return;
+        Log($"slot {slot}: removing stale lock ({lockedOutput.Trim()})");
+        await container.ExecScriptAsync(SlotScripts.Release, [slot.ToString(CultureInfo.InvariantCulture)], TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
     }
 
-    private async Task<string?> HealthCheckAsync(ContainerInfo container, int slot)
+    private static async Task<string?> HealthCheckAsync(ReusableContainer container, int slot)
     {
-        var r = await DockerCli.RunAsync(["exec", container.Name, "sh", "-c", $"kill -0 \"$(cat /data/slot{slot}/pid)\""], null, TimeSpan.FromSeconds(20))
-            .ConfigureAwait(false);
+        var r = await container.ExecAsync(["sh", "-c", $"kill -0 \"$(cat /data/slot{slot}/pid)\""], TimeSpan.FromSeconds(20)).ConfigureAwait(false);
         return r.Ok ? null : "the oxia process exited";
     }
 
     internal async Task<string> GetSlotLogAsync(int slot)
     {
         if (_container is not { } c) return "(no container)";
-        var r = await DockerCli.RunAsync(["exec", c.Name, "tail", "-n", "40", $"/data/slot{slot}/log"], null, TimeSpan.FromSeconds(20)).ConfigureAwait(false);
+        var r = await c.ExecAsync(["tail", "-n", "40", $"/data/slot{slot}/log"], TimeSpan.FromSeconds(20)).ConfigureAwait(false);
         return $"--- last log lines of {c.Name} slot {slot} ---{Environment.NewLine}{AnsiColors.Replace(r.Combined, "")}";
     }
 
@@ -481,8 +312,7 @@ public sealed class OxiaServerFixture : IAsyncLifetime
         {
             if (_container is { } c)
             {
-                var r = await DockerCli.RunAsync(["exec", "-i", c.Name, "sh", "-s", "--", slot.ToString(CultureInfo.InvariantCulture)],
-                    SlotScripts.Release, TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+                var r = await c.ExecScriptAsync(SlotScripts.Release, [slot.ToString(CultureInfo.InvariantCulture)], TimeSpan.FromSeconds(30)).ConfigureAwait(false);
                 if (!r.Ok) Log($"slot {slot}: release failed: {r.Combined}");
             }
         }
@@ -529,5 +359,37 @@ public sealed class OxiaServerFixture : IAsyncLifetime
             echo OK
 
             """;
+    }
+}
+
+/// <summary>Identity of this test process, written into the lock directories of the container so stale locks can be detected.</summary>
+internal static class ProcessOwner
+{
+    /// <summary><c>pid:machine:startTicks</c>.</summary>
+    public static readonly string Id = $"{Environment.ProcessId}:{Environment.MachineName}:{Process.GetCurrentProcess().StartTime.Ticks}";
+
+    /// <summary>
+    /// Whether the owner recorded in a "LOCKED &lt;pid:machine:ticks&gt;" answer may still be running.  Owners on other machines or
+    /// with an unparsable id are assumed alive.
+    /// </summary>
+    public static bool IsAlive(string lockedOutput)
+    {
+        var owner = lockedOutput.Trim();
+        if (owner.StartsWith("LOCKED", StringComparison.Ordinal)) owner = owner[6..].Trim();
+        var parts = owner.Split(':');
+        if (parts.Length != 3 || parts[1] != Environment.MachineName || !int.TryParse(parts[0], out var pid)) return true;
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            return !p.HasExited && p.StartTime.Ticks.ToString(CultureInfo.InvariantCulture) == parts[2];
+        }
+        catch (ArgumentException)
+        {
+            return false; // no such process
+        }
+        catch (InvalidOperationException)
+        {
+            return false; // exited meanwhile
+        }
     }
 }
