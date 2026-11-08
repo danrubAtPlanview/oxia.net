@@ -21,6 +21,8 @@ using F1 = Oxia.Client.Tests.F1Support;
 
 namespace Oxia.Client.Tests.Throughput;
 
+// In the non-parallel collection: ParkingOnAFullQueue_AllocatesNothing_OnceWarm reads the PROCESS-WIDE allocation counter.
+[Collection("Allocations")]
 public class GateAndOptionsTests
 {
     private static readonly TimeSpan Ten = TimeSpan.FromSeconds(10);
@@ -204,9 +206,12 @@ public class GateAndOptionsTests
         long best = long.MaxValue;
         for (int attempt = 0; attempt < 8; attempt++)
         {
-            long before = GC.GetAllocatedBytesForCurrentThread();
+            // Process-wide counter: the continuation after `await parked` runs on arbitrary pool threads, so a per-thread counter sampled
+            // before and after the loop could belong to two different threads (a meaningless difference).  The class runs in the serial
+            // "Allocations" collection, so nothing else allocates meanwhile.
+            long before = GC.GetTotalAllocatedBytes(precise: true);
             for (int i = 0; i < 1000; i++) await Round();
-            long bytes = GC.GetAllocatedBytesForCurrentThread() - before;
+            long bytes = GC.GetTotalAllocatedBytes(precise: true) - before;
             best = Math.Min(best, bytes);
         }
         Assert.True(best <= 1000 * 16, $"{best / 1000.0:0.0} B per parked add (best of 8 rounds of 1000)");
