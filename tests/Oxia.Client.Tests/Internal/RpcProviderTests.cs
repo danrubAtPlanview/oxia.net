@@ -579,30 +579,8 @@ public class RpcProviderTests
         }
     }
 
-    [Fact]
-    public async Task TestExecuteWithRetryWakesUpOnShardMapChange()
-    {
-        // Without the shard map change, the retry would wait at least 50 ms
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(40));
-
-        var changed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var timer = new ShardMapTimer();
-        int attempts = 0;
-        int result = await RpcProvider.ExecuteWithRetryTimer(cts.Token, timer, hint =>
-        {
-            timer.Changed = changed.Task;
-            attempts++;
-            if (attempts == 1)
-            {
-                // The shard map changes while the attempt is in progress
-                changed.SetResult();
-                throw OxiaErrors.ToThrowable(OxiaErrors.NodeIsNotLeader);
-            }
-
-            return ValueTask.FromResult(attempts);
-        });
-        Assert.Equal(2, result);
-    }
+    // TestExecuteWithRetryWakesUpOnShardMapChange (rpc_provider_test.go) lives in RpcProviderTimingTests (RpcProviderTests.Timing.cs): its 40 ms
+    // budget needs the serial collection.
 
     // The consumer of the responses of a list or a range scan ends it with an error, which is returned without a retry.
     [Fact]
