@@ -65,7 +65,7 @@ separately).
 
 ## Cross-component notes
 
-* `Connection.ClientRpc` creates `new OxiaClientRpc(CallInvoker)` (component A); the unit tests that call `GetClientRpc` need A's constructor not to throw.
+* `Connection.ClientRpc` creates `new OxiaClientRpc(CallInvoker)` (component A). With the skeleton stub (constructor throws) exactly 5 tests fail: `TestClientPoolGetRpcReusesConnection`, `TestClientPoolCloseIgnoresConnectionCloseError`, `TestClientPoolRemoveConnectionIgnoresConnectionCloseError`, `TestClientPoolRemoveConnectionKeepsOtherTargets` (Go calls `GetClientRpc`) and the extra `TheClientRpcFacadeIsCachedPerConnection`.
 * `GrpcClientMetricsInterceptor.Default` (meter `oxia`) is applied to every pooled connection; the `ClientPool` constructor keeps the Go-shaped signature, so a
   host-supplied `IMeterFactory` cannot reach it yet.
 
@@ -73,6 +73,6 @@ separately).
 
 * Go test functions in scope: 98 (+ 3 in the `disable_trap` flavour files) — ported 97 and passing; skipped 4 with `[Fact(Skip)]`: `TestFailpointsTriggerDisabled`,
   `TestFailpointsFailDisabled`, `TestEvalDisabled` (no `disable_trap` flavour) and `TestRegisterPreInitializesSeries` (server-side `Register`).
-* C# tests under `Oxia.Client.Tests.Common`: 440 (436 passing, 4 skipped), the rest being `[Theory]` rows of the ported tests and the extra tests.
+* C# tests under `Oxia.Client.Tests.Common`: 441 (437 passing with a constructible `OxiaClientRpc`, 4 skipped), the rest being `[Theory]` rows of the ported tests and the extra tests.
 * Not ported (not used by the client): `concurrent/{batcher,callback,callback_adaptor,condition,once,utils}.go` and their tests, `channel/{override_channel,read}.go` and
   tests, `time/clock.go`, the server half of `rpc/grpcmetrics`, `rpc.GetPeer`, `GetCoordinationRpc` / `GetReplicationRpc`.

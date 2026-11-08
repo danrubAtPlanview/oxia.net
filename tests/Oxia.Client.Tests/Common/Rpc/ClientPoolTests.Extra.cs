@@ -62,7 +62,7 @@ public class ClientPoolExtraTests
     {
         await using var pool = new ClientPool(null, null);
 
-        var rpcs = await Task.WhenAll(Enumerable.Range(0, 32).Select(_ => Task.Run(() => pool.GetClientRpc("localhost:1"))));
+        var rpcs = await Task.WhenAll(Enumerable.Range(0, 32).Select(_ => Task.Run(() => pool.GetHealthRpc("localhost:1"))));
 
         Assert.Equal(1, pool.ConnectionCount);
         Assert.All(rpcs, rpc => Assert.Same(rpcs[0], rpc));
@@ -73,11 +73,21 @@ public class ClientPoolExtraTests
     {
         await using var pool = new ClientPool(null, null);
 
-        Assert.Same(pool.GetClientRpc("localhost:1"), pool.GetClientRpc("localhost:1"));
         Assert.Same(pool.GetAdminRpc("localhost:1"), pool.GetAdminRpc("localhost:1"));
         Assert.Same(pool.GetHealthRpc("localhost:1"), pool.GetHealthRpc("localhost:1"));
-        Assert.NotSame(pool.GetClientRpc("localhost:1"), pool.GetClientRpc("localhost:2"));
+        Assert.NotSame(pool.GetHealthRpc("localhost:1"), pool.GetHealthRpc("localhost:2"));
         Assert.Equal(2, pool.ConnectionCount);
+    }
+
+    // needs OxiaClientRpc (component A) to be constructible
+    [Fact]
+    public async Task TheClientRpcFacadeIsCachedPerConnection()
+    {
+        await using var pool = new ClientPool(null, null);
+
+        Assert.Same(pool.GetClientRpc("localhost:1"), pool.GetClientRpc("localhost:1"));
+        Assert.NotSame(pool.GetClientRpc("localhost:1"), pool.GetClientRpc("localhost:2"));
+        Assert.Same(pool.GetConnectionFromPool("localhost:1").ClientRpc, pool.GetClientRpc("localhost:1"));
     }
 
     [Fact]
@@ -86,7 +96,7 @@ public class ClientPoolExtraTests
         GrpcChannelOptions? captured = null;
         await using var pool = new ClientPool(null, null, options => captured = options);
 
-        pool.GetClientRpc("localhost:1");
+        pool.GetConnectionFromPool("localhost:1");
 
         Assert.NotNull(captured);
         Assert.Equal(Constants.MaxGrpcFrameSize, captured.MaxReceiveMessageSize);
@@ -108,7 +118,7 @@ public class ClientPoolExtraTests
             options => options.MaxReceiveMessageSize = 1234,
             options => captured = options);
 
-        pool.GetClientRpc("localhost:1");
+        pool.GetConnectionFromPool("localhost:1");
 
         Assert.Equal(1234, captured!.MaxReceiveMessageSize);
     }
@@ -124,9 +134,9 @@ public class ClientPoolExtraTests
         var tlsConf = new SslClientAuthenticationOptions { TargetHost = "configured.example" };
         await using var configuredPool = new ClientPool(tlsConf, null, options => configured = options);
 
-        plainPool.GetClientRpc("host.example:6648");
-        prefixedPool.GetClientRpc("tls://host.example:6648");
-        configuredPool.GetClientRpc("host.example:6648");
+        plainPool.GetConnectionFromPool("host.example:6648");
+        prefixedPool.GetConnectionFromPool("tls://host.example:6648");
+        configuredPool.GetConnectionFromPool("host.example:6648");
 
         // no TLS: the handler's TLS options are untouched
         Assert.Equal(SslProtocols.None, SslOf(plain!).EnabledSslProtocols);
@@ -146,11 +156,11 @@ public class ClientPoolExtraTests
         var auth = Authentication.NewTokenAuthenticationWithToken("token", true);
 
         await using var viaPrefix = new ClientPool(null, auth);
-        viaPrefix.GetClientRpc("tls://localhost:1");
+        viaPrefix.GetConnectionFromPool("tls://localhost:1");
         Assert.Equal(1, viaPrefix.ConnectionCount);
 
         await using var viaConf = new ClientPool(new SslClientAuthenticationOptions(), auth);
-        viaConf.GetClientRpc("localhost:1");
+        viaConf.GetConnectionFromPool("localhost:1");
         Assert.Equal(1, viaConf.ConnectionCount);
     }
 
@@ -274,9 +284,9 @@ public class ClientPoolExtraTests
         var services = new ServiceCollection().AddSingleton<ResolverFactory>(factory).BuildServiceProvider();
 
         await using var plain = new ClientPool(null, Authentication.NewTokenAuthenticationWithToken("t", false), options => options.ServiceProvider = services);
-        plain.GetClientRpc("custom:///oxia");
+        plain.GetConnectionFromPool("custom:///oxia");
         await using var secure = new ClientPool(new SslClientAuthenticationOptions(), Authentication.NewTokenAuthenticationWithToken("t", true), options => options.ServiceProvider = services);
-        secure.GetClientRpc("custom:///oxia");
+        secure.GetConnectionFromPool("custom:///oxia");
         Assert.Equal(1, plain.ConnectionCount);
         Assert.Equal(1, secure.ConnectionCount);
     }
@@ -302,8 +312,8 @@ public class ClientPoolExtraTests
     public async Task CloseClosesEveryConnection_AndDisposeNeverThrows()
     {
         var pool = new ClientPool(null, null);
-        pool.GetClientRpc("localhost:1");
-        pool.GetClientRpc("localhost:2");
+        pool.GetConnectionFromPool("localhost:1");
+        pool.GetConnectionFromPool("localhost:2");
         pool.TryGetConnection("localhost:1", out var first);
 
         await pool.CloseAsync();
