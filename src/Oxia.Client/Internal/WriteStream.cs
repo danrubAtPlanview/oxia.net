@@ -53,6 +53,8 @@ internal sealed class StreamWrapper
     private readonly CancellationTokenSource _cts;
     private readonly ILogger _logger;
     private Future<WriteResponse>?[] _ring = new Future<WriteResponse>?[4];
+    private readonly Future<WriteResponse>[] _spareFutures = new Future<WriteResponse>[4]; // guarded by _queueLock
+    private int _spareFutureCount;
     private int _head;
     private int _count;
     private volatile bool _failed;
@@ -98,7 +100,7 @@ internal sealed class StreamWrapper
         ct.ThrowIfCancellationRequested();
         var req = prepare();
 
-        var f = new Future<WriteResponse>();
+        var f = RentFuture();
 
         await _sendLock.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -132,7 +134,46 @@ internal sealed class StreamWrapper
             _sendLock.Release();
         }
 
-        return await f.WaitAsync(ct).ConfigureAwait(false);
+        WriteResponse response;
+        try
+        {
+            response = await f.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw; // the request gave up: the future may still be queued, the receive loop completes it later -- never reused
+        }
+        catch
+        {
+            RecycleFuture(f); // failed by the receive loop (it dequeued the future before failing it)
+            throw;
+        }
+
+        RecycleFuture(f); // completed by the receive loop, which dequeued it first and touches it no more
+        return response;
+    }
+
+    private Future<WriteResponse> RentFuture()
+    {
+        lock (_queueLock)
+        {
+            if (_spareFutureCount > 0)
+            {
+                var f = _spareFutures[--_spareFutureCount];
+                _spareFutures[_spareFutureCount] = null!;
+                return f;
+            }
+        }
+        return new Future<WriteResponse>();
+    }
+
+    private void RecycleFuture(Future<WriteResponse> f)
+    {
+        f.Reset();
+        lock (_queueLock)
+        {
+            if (_spareFutureCount < _spareFutures.Length) _spareFutures[_spareFutureCount++] = f;
+        }
     }
 
     /// <summary>Cancels the stream (Go: the cancel func given to newStreamWrapper).</summary>

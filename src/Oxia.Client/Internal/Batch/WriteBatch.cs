@@ -38,6 +38,7 @@
 //      * ErrRequestTooLarge is declared in ClientErrors.RequestTooLarge (lead's file); it is not used by the batch itself in
 //        Go either (it is returned by the async client before calling Add).
 // =====================================================================================================================
+using System.Runtime.CompilerServices;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Oxia.Client.Batch;
@@ -154,6 +155,7 @@ internal sealed class WriteBatch : IBatch, IRecyclableBatch
 
     public int Size => _puts.Count + _deletes.Count + _deleteRanges.Count;
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask CompleteAsync()
     {
         if (Size == 0)

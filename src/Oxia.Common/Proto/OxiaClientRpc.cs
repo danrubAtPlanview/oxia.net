@@ -24,6 +24,7 @@
 //        Dispose, or the parent token was cancelled); gRPC.NET offers no "call finished" event to hook otherwise.
 // =====================================================================================================================
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using Grpc.Core;
 using Oxia.Common.Constant;
 using Oxia.Common.Proto;
@@ -181,11 +182,16 @@ internal sealed class ServerStreamingClient<T> : IServerStreamingClient<T> where
         _reader = call.ResponseStream;
     }
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<T?> RecvAsync(CancellationToken ct = default)
     {
         try
         {
-            return await _reader.MoveNext(ct).ConfigureAwait(false) ? _reader.Current : null;
+            // The metrics-intercepted stream observes the message with a pooled awaiter (no Task per message)
+            bool has = _reader is IObservedStreamReader<T> observed
+                ? await observed.MoveNextObserved(ct).ConfigureAwait(false)
+                : await _reader.MoveNext(ct).ConfigureAwait(false);
+            return has ? _reader.Current : null;
         }
         catch (Exception ex) when (GrpcErrors.TryTranslate(ex, out Exception? translated))
         {
@@ -243,11 +249,13 @@ internal sealed class WriteStreamCall : IWriteStreamCall
         if (Interlocked.Exchange(ref _ended, 1) == 0) Volatile.Read(ref _context)?.Cancel();
     }
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask SendAsync(WriteRequest request, CancellationToken ct = default)
     {
         try
         {
-            if (ct.CanBeCanceled) await _call.RequestStream.WriteAsync(request, ct).ConfigureAwait(false);
+            if (_call.RequestStream is IObservedStreamWriter<WriteRequest> observed) await observed.WriteObserved(request, ct).ConfigureAwait(false);
+            else if (ct.CanBeCanceled) await _call.RequestStream.WriteAsync(request, ct).ConfigureAwait(false);
             else await _call.RequestStream.WriteAsync(request).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -258,11 +266,16 @@ internal sealed class WriteStreamCall : IWriteStreamCall
         }
     }
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<WriteResponse?> RecvAsync(CancellationToken ct = default)
     {
         try
         {
-            if (await _call.ResponseStream.MoveNext(ct).ConfigureAwait(false)) return _call.ResponseStream.Current;
+            var reader = _call.ResponseStream;
+            bool has = reader is IObservedStreamReader<WriteResponse> observed
+                ? await observed.MoveNextObserved(ct).ConfigureAwait(false)
+                : await reader.MoveNext(ct).ConfigureAwait(false);
+            if (has) return reader.Current;
             MarkEnded();
             return null;
         }

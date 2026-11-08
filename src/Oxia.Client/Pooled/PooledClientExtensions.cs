@@ -11,6 +11,7 @@
 //              call falls back to GetAsync and COPIES the value into a pooled buffer: same contract, not zero-allocation.
 //   Divergences: n/a (an addition; Go has no equivalent).
 // =====================================================================================================================
+using System.Threading.Channels;
 using Oxia.Common.Proto;
 
 namespace Oxia.Client.Pooled;
@@ -63,6 +64,48 @@ public static class PooledClientExtensions
             call.Complete(null, e);
         }
         return await result.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Like <see cref="IAsyncClient.RangeScanAsync"/> (same shards, same key order, same errors), but every record is a
+    /// <see cref="PooledGetResult"/>: its key and value are bytes in a pooled buffer, so a scan allocates nothing per record in steady
+    /// state.  Dispose each record once you are done with it.  The reader is for a single consumer; the shard streams are read eagerly
+    /// (as for RangeScanAsync), so a slow consumer buffers the scan.
+    /// </summary>
+    public static ChannelReader<PooledGetResult> RangeScanPooledAsync(this IAsyncClient client, CancellationToken ct,
+        string minKeyInclusive, string maxKeyExclusive, params ReadOnlySpan<RangeScanOption> options)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        if (client is AsyncClientImpl impl)
+        {
+            return PooledRangeScan.Start(impl, ct, minKeyInclusive, maxKeyExclusive, RangeScanOptions.Create(options));
+        }
+
+        // Any other IAsyncClient: the plain scan, with each value copied into a pooled buffer
+        var plain = client.RangeScanAsync(ct, minKeyInclusive, maxKeyExclusive, options);
+        var channel = Channel.CreateUnbounded<PooledGetResult>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+        _ = CopyScanAsync(plain, channel.Writer, ct);
+        return channel.Reader;
+    }
+
+    private static async Task CopyScanAsync(ChannelReader<GetResult> source, ChannelWriter<PooledGetResult> target, CancellationToken ct)
+    {
+        try
+        {
+            await foreach (var r in source.ReadAllAsync(ct).ConfigureAwait(false))
+            {
+                target.TryWrite(r.Err is not null ? new PooledGetResult(r.Err) : PooledGetResult.FromArray(r.Key, r.Value, r.Version));
+            }
+            target.TryComplete();
+        }
+        catch (OperationCanceledException)
+        {
+            target.TryComplete();
+        }
+        catch (Exception e)
+        {
+            target.TryComplete(e);
+        }
     }
 
     private static async ValueTask<PooledGetResult> GetPooledFallback(IAsyncClient client, string key, GetOption[] options)

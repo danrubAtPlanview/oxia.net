@@ -22,6 +22,7 @@
 //      * `slog.Info("Shard was split/merged, ...")` goes through Oxia.Common.Logging.OxiaLog (category oxia.batch).
 //      * `namespace` is carried but, like in Go, unused.
 // =====================================================================================================================
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
 using Oxia.Client.Batch;
 using Oxia.Client.Internal.Model;
@@ -100,6 +101,7 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
 
     public int Size => _gets.Count;
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask CompleteAsync()
     {
         var metrics = _factory.Metrics;

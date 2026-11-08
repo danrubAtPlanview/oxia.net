@@ -29,6 +29,7 @@ using System.Threading.Channels;
 using Oxia.Client.Internal;
 using Oxia.Client.Internal.Batch;
 using Oxia.Client.Internal.Model;
+using Oxia.Client.Pooled;
 using Oxia.Common;
 using Oxia.Common.Concurrent;
 using Oxia.Common.Constant;
@@ -510,54 +511,15 @@ internal sealed class AsyncClientImpl : IAsyncClient
         }
 
         // If there is no partition key, we will make the request to delete-range on all the shards
-        var shardIds = ShardManager.GetAll();
-        var wg = new WaitGroup(shardIds.Length);
-
-        Action<DeleteRangeResponse?, Exception?> callback = (response, err) =>
-        {
-            if (err is not null)
-            {
-                wg.Fail(err);
-                return;
-            }
-
-            if (response!.Status == Status.Ok)
-            {
-                wg.Done();
-            }
-            else
-            {
-                wg.Fail(ProtoUtils.ToError(response.Status)!);
-            }
-        };
-
-        foreach (var shardId in shardIds)
-        {
-            AddToWriteManager(shardId, new DeleteRangeCall
-            {
-                MinKeyInclusive = minKeyInclusive,
-                MaxKeyExclusive = maxKeyExclusive,
-                // Shared by the calls to all the shards: once one is sent, the others are not dropped anymore
-                CallContext = opts.CallContext,
-                Callback = callback,
-            });
-        }
-        return wg.WaitAsync(Ctx);
+        // (Go: a wait group + a callback closure + one call per shard.  PooledDeleteRange is all of them in one pooled object: the
+        // first failure wins, otherwise every shard answered Ok; the context ends the wait.)
+        return PooledDeleteRange.Start(this, ShardManager.GetAll(), minKeyInclusive, maxKeyExclusive, null, opts.CallContext);
     }
 
     private ValueTask<Exception?> DoSingleShardDeleteRange(long shardId, string minKeyInclusive, string maxKeyExclusive,
         string partitionKey, CallContext? callContext)
     {
-        var call = new DeleteRangeCompletion
-        {
-            MinKeyInclusive = minKeyInclusive,
-            MaxKeyExclusive = maxKeyExclusive,
-            PartitionKey = partitionKey,
-            CallContext = callContext,
-        };
-        var result = call.AsValueTask();
-        AddToWriteManager(shardId, call);
-        return result;
+        return PooledDeleteRange.Start(this, [shardId], minKeyInclusive, maxKeyExclusive, partitionKey, callContext);
     }
 
     // -----------------------------------------------------------------------------------------------------------------

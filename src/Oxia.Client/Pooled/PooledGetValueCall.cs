@@ -47,17 +47,7 @@ internal sealed class PooledGetValueCall : GetCall, IValueTaskSource<PooledGetRe
         var statusError = ProtoUtils.ToError(response!.Status);
         if (statusError is not null) return new PooledGetResult(statusError);
 
-        var version = ProtoUtils.ToVersion(response.Version);
-        string key = response.Key ?? originalKey;
-        ValueLease? lease = response.DetachLease();
-        if (lease is not null)
-        {
-            // A comparison / index get: the stored key came with the response, in the lease
-            if (response.Key is null && lease.KeyLength >= 0) key = lease.KeyString();
-            return new PooledGetResult(lease, lease.Generation, key, version, null);
-        }
-
-        return PooledGetResult.FromArray(key, response.Value, version);
+        return PooledGetResult.FromResponse(response, originalKey);
     }
 
     PooledGetResult IValueTaskSource<PooledGetResult>.GetResult(short token)
