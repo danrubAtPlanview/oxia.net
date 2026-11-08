@@ -141,10 +141,10 @@ internal sealed class CostCache<TValue> where TValue : class
 
         long expiresAt = ttl > TimeSpan.Zero ? Environment.TickCount64 + Math.Max(1, (long)ttl.TotalMilliseconds) : 0;
         var shard = ShardFor(key);
-        long delta;
-        int added = 0;
+        long total;
         lock (shard.Lock)
         {
+            long delta;
             if (shard.Map.TryGetValue(key, out var node))
             {
                 delta = cost - node.Cost;
@@ -159,11 +159,11 @@ internal sealed class CostCache<TValue> where TValue : class
                 shard.Map.Add(key, node);
                 shard.PushFront(node);
                 delta = cost;
-                added = 1;
+                Interlocked.Increment(ref _count);
             }
+            // The accounting changes together with the structure (under the shard lock): it never goes negative
+            total = delta == 0 ? Volatile.Read(ref _totalCost) : Interlocked.Add(ref _totalCost, delta);
         }
-        if (added != 0) Interlocked.Increment(ref _count);
-        long total = delta == 0 ? Volatile.Read(ref _totalCost) : Interlocked.Add(ref _totalCost, delta);
         if (total > _maxCost || Volatile.Read(ref _count) > _maxItems) EvictUntilFits(key);
 
         // A concurrent Close may have raced with the insertion: leave nothing behind.
@@ -186,18 +186,18 @@ internal sealed class CostCache<TValue> where TValue : class
     {
         foreach (var shard in _shards)
         {
-            long cost = 0;
-            int n = 0;
             lock (shard.Lock)
             {
+                long cost = 0;
+                int n = 0;
                 foreach (var node in shard.Map.Values) { cost += node.Cost; n++; }
                 shard.Map.Clear();
                 shard.Head = shard.Tail = null;
-            }
-            if (n != 0)
-            {
-                Interlocked.Add(ref _totalCost, -cost);
-                Interlocked.Add(ref _count, -n);
+                if (n != 0)
+                {
+                    Interlocked.Add(ref _totalCost, -cost);
+                    Interlocked.Add(ref _count, -n);
+                }
             }
         }
     }
