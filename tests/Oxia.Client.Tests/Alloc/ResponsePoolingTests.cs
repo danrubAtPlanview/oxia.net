@@ -88,22 +88,30 @@ public class ResponsePoolingTests
     [Fact]
     public void ARentedMessage_IsCleanAndItsChildrenAreRecycled()
     {
-        var first = Deserialize(OxiaClientMethods.WriteResponseMarshaller, WriteResponseBytes(3, deletes: 2));
-        var children = first.Puts.ToArray();
-        var version = children[0].Version;
-        Assert.Equal(100, version!.VersionId);
-        first.Release();
+        // The pool is process-wide and other tests' background work may rent the released message first: try a few times to get it back
+        for (int attempt = 0; attempt < 200; attempt++)
+        {
+            var first = Deserialize(OxiaClientMethods.WriteResponseMarshaller, WriteResponseBytes(3, deletes: 2));
+            var children = first.Puts.ToArray();
+            Assert.Equal(100, children[0].Version!.VersionId);
+            first.Release();
 
-        var second = Deserialize(OxiaClientMethods.WriteResponseMarshaller, WriteResponseBytes(2));
-        Assert.Same(first, second); // the pool is process-wide, this test class runs alone
-        Assert.Equal(2, second.Puts.Count);
-        Assert.Empty(second.Deletes); // nothing of the previous contents is left
-        // the children (and their versions) were recycled into the new parse
-        Assert.Contains(second.Puts[0], children);
-        Assert.Contains(second.Puts[1], children);
-        Assert.Equal(100, second.Puts[0].Version!.VersionId);
-        Assert.Equal(101, second.Puts[1].Version!.VersionId);
-        second.Release();
+            var second = Deserialize(OxiaClientMethods.WriteResponseMarshaller, WriteResponseBytes(2));
+            Assert.Equal(2, second.Puts.Count); // whichever message it is, it is clean
+            Assert.Empty(second.Deletes);
+            Assert.Equal(100, second.Puts[0].Version!.VersionId);
+            Assert.Equal(101, second.Puts[1].Version!.VersionId);
+            bool sameMessage = ReferenceEquals(first, second);
+            if (sameMessage)
+            {
+                // the children (and their versions) were recycled into the new parse
+                Assert.Contains(second.Puts[0], children);
+                Assert.Contains(second.Puts[1], children);
+            }
+            second.Release();
+            if (sameMessage) return;
+        }
+        Assert.Fail("the released message was never handed out again");
     }
 
     [Fact]
@@ -207,6 +215,27 @@ public class ResponsePoolingTests
         Assert.Equal("the-key", g0.Key);
 
         pooled.Release();
+    }
+
+    [Fact]
+    public void ClassicResponses_NeverContainPooledModeChildren_EvenAfterPooledParses()
+    {
+        var source = new ReadResponse();
+        for (int i = 0; i < 5; i++) source.Gets.Add(new GetResponse { Status = Status.Ok, Value = [1, 2, 3], Key = "k" + i });
+        byte[] bytes = MessageCodec.ToArray<ReadResponseCodec, ReadResponse>(source);
+
+        for (int round = 0; round < 50; round++)
+        {
+            var pooled = Deserialize(OxiaClientMethods.ReadResponsePooledMarshaller, bytes);
+            Assert.All(pooled.Gets, g => Assert.IsType<PooledGetResponse>(g));
+            pooled.Release();
+
+            // whatever the pools hold, a classic parse yields plain GetResponses (the structural dump of the codec tests shows the type name)
+            var classic = Deserialize(OxiaClientMethods.ReadResponseMarshaller, bytes);
+            Assert.All(classic.Gets, g => Assert.IsType<GetResponse>(g));
+            Assert.Equal([1, 2, 3], classic.Gets[0].Value);
+            classic.Release();
+        }
     }
 
     [Fact]

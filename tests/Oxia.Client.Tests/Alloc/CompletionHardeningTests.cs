@@ -21,6 +21,8 @@ using OxiaMetrics = Oxia.Client.Internal.Metrics.Metrics;
 
 namespace Oxia.Client.Tests.Alloc;
 
+// (the pooled responses are process-wide: tests that inspect a released response run alone)
+[Collection("Z1 serial")]
 public class CompletionHardeningTests
 {
     private static WriteBatchFactory WriteFactory(Func<WriteRequest, WriteResponse> answer, WriteRerouter? reroute = null) => new()

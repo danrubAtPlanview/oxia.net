@@ -353,6 +353,10 @@ public class ReadRequest
 public class ReadResponse
 {
     internal int PoolState;
+
+    /// <summary>Rented for a read that asked for pooled values: its children are <see cref="PooledGetResponse"/>s, and it has its own pool.</summary>
+    internal bool PooledMode;
+    private static readonly BoundedStack<ReadResponse> PooledModeStack = new(64);
     internal Spares<GetResponse> SpareGets;
     private readonly List<GetResponse> _gets = new();
     public List<GetResponse> Gets { get { PoolGuard.AssertLive(PoolState); return _gets; } }
@@ -370,6 +374,14 @@ public class ReadResponse
         return m;
     }
 
+    /// <summary>Like <see cref="Rent"/>, for the pooled-value parse: such messages never mix their (lease-carrying) children with the classic ones.</summary>
+    internal static ReadResponse RentPooledValues()
+    {
+        var m = PooledModeStack.TryPop() ?? new ReadResponse { PooledMode = true };
+        m.PoolState = PoolStates.Rented;
+        return m;
+    }
+
     /// <summary>See <see cref="WriteResponse.Release"/>.  Values already handed to a caller (the arrays, the detached leases) are not affected.</summary>
     public void Release()
     {
@@ -378,7 +390,8 @@ public class ReadResponse
         SpareGets.Trim(PoolLimits.MaxSpareChildren);
         PoolLimits.Trim(_gets);
         Volatile.Write(ref PoolState, PoolStates.Pooled);
-        MessagePool<ReadResponse>.Return(this);
+        if (PooledMode) PooledModeStack.TryPush(this);
+        else MessagePool<ReadResponse>.Return(this);
     }
 
     /// <summary>
@@ -459,6 +472,10 @@ public class RangeScanRequest
 public class RangeScanResponse
 {
     internal int PoolState;
+
+    /// <summary>See <see cref="ReadResponse.PooledMode"/>.</summary>
+    internal bool PooledMode;
+    private static readonly BoundedStack<RangeScanResponse> PooledModeStack = new(64);
     internal Spares<GetResponse> SpareRecords;
     private readonly List<GetResponse> _records = new();
     public List<GetResponse> Records { get { PoolGuard.AssertLive(PoolState); return _records; } }
@@ -476,6 +493,14 @@ public class RangeScanResponse
         return m;
     }
 
+    /// <summary>See <see cref="ReadResponse.RentPooledValues"/>.</summary>
+    internal static RangeScanResponse RentPooledValues()
+    {
+        var m = PooledModeStack.TryPop() ?? new RangeScanResponse { PooledMode = true };
+        m.PoolState = PoolStates.Rented;
+        return m;
+    }
+
     /// <summary>See <see cref="ReadResponse.Release"/>.</summary>
     public void Release()
     {
@@ -484,7 +509,8 @@ public class RangeScanResponse
         SpareRecords.Trim(PoolLimits.MaxSpareChildren);
         PoolLimits.Trim(_records);
         Volatile.Write(ref PoolState, PoolStates.Pooled);
-        MessagePool<RangeScanResponse>.Return(this);
+        if (PooledMode) PooledModeStack.TryPush(this);
+        else MessagePool<RangeScanResponse>.Return(this);
     }
 }
 

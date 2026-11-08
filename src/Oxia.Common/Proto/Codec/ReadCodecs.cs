@@ -302,7 +302,7 @@ public readonly struct ReadResponseCodec : IPooledMessageCodec<ReadResponse>
 public readonly struct ReadResponsePooledCodec : IPooledMessageCodec<ReadResponse>
 {
     public static ReadResponse Create() => ReadResponseCodec.Create();
-    public static ReadResponse Rent() => ReadResponse.Rent();
+    public static ReadResponse Rent() => ReadResponse.RentPooledValues();
     public static void Reset(ReadResponse m) => m.Reset();
     public static int Size(ReadResponse m) => ReadResponseCodec.Size(m);
     public static void WriteTo(ref ProtoWriter w, ReadResponse m) => ReadResponseCodec.WriteTo(ref w, m);

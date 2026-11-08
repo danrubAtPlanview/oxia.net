@@ -70,21 +70,27 @@ public class ValueLeaseTests
     [Fact]
     public void ASecondRelease_WithTheOldGeneration_IsIgnored()
     {
-        var lease = ValueLease.Rent();
-        int generation = lease.Generation;
-        "abc"u8.CopyTo(lease.ReserveValue(3));
+        // The pool is process-wide: look for the moment the very same lease is handed out again
+        for (int attempt = 0; attempt < 200; attempt++)
+        {
+            var lease = ValueLease.Rent();
+            int generation = lease.Generation;
+            "abc"u8.CopyTo(lease.ReserveValue(3));
 
-        Assert.True(lease.TryRelease(generation));
-        Assert.False(lease.TryRelease(generation)); // a copy of the result disposing again: ignored
-        Assert.NotEqual(generation, lease.Generation);
+            Assert.True(lease.TryRelease(generation));
+            Assert.False(lease.TryRelease(generation)); // a copy of the result disposing again: ignored
+            Assert.NotEqual(generation, lease.Generation);
 
-        // another user rents the very same lease (the pool is process-wide and this class runs alone): the stale release must not touch it
-        var other = ValueLease.Rent();
-        Assert.Same(lease, other);
-        "xyz"u8.CopyTo(other.ReserveValue(3));
-        Assert.False(lease.TryRelease(generation));
-        Assert.Equal("xyz", Encoding.UTF8.GetString(other.Value));
-        other.TryRelease(other.Generation);
+            // another user rents the lease (when it is the same one): the stale release must not touch it
+            var other = ValueLease.Rent();
+            "xyz"u8.CopyTo(other.ReserveValue(3));
+            Assert.False(lease.TryRelease(generation));
+            Assert.Equal("xyz", Encoding.UTF8.GetString(other.Value));
+            bool same = ReferenceEquals(lease, other);
+            other.TryRelease(other.Generation);
+            if (same) return;
+        }
+        Assert.Fail("the released lease was never handed out again");
     }
 
     [Fact]

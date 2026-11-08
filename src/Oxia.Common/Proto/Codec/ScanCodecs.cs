@@ -215,7 +215,7 @@ public readonly struct RangeScanResponseCodec : IPooledMessageCodec<RangeScanRes
 public readonly struct RangeScanResponsePooledCodec : IPooledMessageCodec<RangeScanResponse>
 {
     public static RangeScanResponse Create() => RangeScanResponseCodec.Create();
-    public static RangeScanResponse Rent() => RangeScanResponse.Rent();
+    public static RangeScanResponse Rent() => RangeScanResponse.RentPooledValues();
     public static void Reset(RangeScanResponse m) => m.Reset();
     public static int Size(RangeScanResponse m) => RangeScanResponseCodec.Size(m);
     public static void WriteTo(ref ProtoWriter w, RangeScanResponse m) => RangeScanResponseCodec.WriteTo(ref w, m);
