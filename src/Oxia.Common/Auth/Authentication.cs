@@ -5,6 +5,9 @@
 //   Intent   : Per-RPC credentials.  The token implementation emits `authorization: Bearer <token>` on every call.
 //              `RequireTransportSecurity` mirrors Go: when true the credentials are only sent over TLS (the ClientPool
 //              maps it to Grpc.Net.Client's CallCredentials / UnsafeUseInsecureChannelCallCredentials).
+//   Divergences: credentials.PerRPCCredentials.GetRequestMetadata(ctx, uri...) (map, error) -> GetRequestMetadataAsync(ct, uri...) returning the
+//              map (errors are thrown); the token function is evaluated on every call, like Go.  Tests: Common/Auth/TokenTests.cs (the Go
+//              repo has none for this package).
 // =====================================================================================================================
 namespace Oxia.Common.Auth;
 

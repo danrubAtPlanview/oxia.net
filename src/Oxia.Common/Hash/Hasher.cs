@@ -6,6 +6,10 @@
 //              bits.  System.IO.Hashing.XxHash3 is bit-compatible with github.com/zeebo/xxh3 (same canonical XXH3_64bits).
 //   Performance: no allocation -- short keys are transcoded into a stack buffer, long keys into a pooled array.
 //              Callers that already hold UTF-8 bytes use the span overload.
+//   Divergences: Go hashes the raw bytes of a string; a .NET string is UTF-16, so the UTF-8 encoding is hashed (a lone surrogate hashes
+//              as U+FFFD, EF BF BD -- the client validates keys before routing them).  Verified bit-identical in
+//              tests/Oxia.Client.Tests/Common/Hash/HashTests.cs: the Go test vectors (foo / bar / baz) plus reference XXH3_64bits() values
+//              (xxHash C library) for inputs of 0..4096 bytes covering every XXH3 length class, ASCII and unicode keys, stack and pooled paths.
 // =====================================================================================================================
 using System.Buffers;
 using System.IO.Hashing;

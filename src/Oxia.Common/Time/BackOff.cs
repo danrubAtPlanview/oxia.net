@@ -1,10 +1,18 @@
 // =====================================================================================================================
-// PORT NOTE   *** CONTRACT STUB -- owned by the "common utilities" component; replace bodies, keep signatures ***
-//   Upstream : common/time/backoff.go, common/time/jitter.go, and the subset of github.com/cenkalti/backoff/v4 v4.3.0
-//              that the client uses (ExponentialBackOff, WithContext, Retry, RetryNotify, RetryNotifyWithTimer, Permanent,
-//              ZeroBackOff, Timer).
+// PORT NOTE
+//   Upstream : common/time/backoff.go  (NewBackOff, NewBackOffWithInitialInterval, ConcurrentBackOff)
+//              + github.com/cenkalti/backoff/v4 v4.3.0: backoff.go (BackOff, Stop, ZeroBackOff), context.go (BackOffContext,
+//              WithContext, getContext).  ExponentialBackOff is in ExponentialBackOff.cs, the retry loop in Retry.cs, the
+//              default timer in SystemRetryTimer.cs.  common/time/clock.go (Clock, MockedClock) is not used by the client.
 //   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
-//   Intent   : Exponential backoff with jitter + a retry loop with cenkalti semantics (see Retry.cs notes below).
+//   Intent   : The backoff abstraction the client's retry loops are written against.  `IBackOff.NextBackOff` returns the
+//              wait before the next attempt or `BackOffConstants.Stop`; an `IBackOffContext` is a backoff bound to a
+//              cancellation token (Go's context.Context) that returns Stop once the token is cancelled.
+//   Divergences:
+//      * time.Duration (ns) -> TimeSpan (100ns ticks); `backoff.Stop` is TimeSpan.FromTicks(-1) like Go's Duration(-1).
+//      * context.Context -> CancellationToken.  `Context` of a backoff that is not bound to a token is
+//        CancellationToken.None (Go: context.Background()).
+//      * `WithContext` on an already-wrapped backoff re-wraps the inner backoff with the new token (as cenkalti does).
 // =====================================================================================================================
 namespace Oxia.Common.Time;
 
@@ -32,18 +40,6 @@ public static class BackOffConstants
     public static readonly TimeSpan DefaultMaxElapsedTime = TimeSpan.FromMinutes(15);
 }
 
-/// <summary>cenkalti ExponentialBackOff (same field names/semantics; MaxElapsedTime == 0 means never stop).</summary>
-public sealed class ExponentialBackOff : IBackOff
-{
-    public TimeSpan InitialInterval = BackOffConstants.DefaultInitialInterval;
-    public double RandomizationFactor = BackOffConstants.DefaultRandomizationFactor;
-    public double Multiplier = BackOffConstants.DefaultMultiplier;
-    public TimeSpan MaxInterval = BackOffConstants.DefaultMaxInterval;
-    public TimeSpan MaxElapsedTime = BackOffConstants.DefaultMaxElapsedTime;
-    public TimeSpan NextBackOff() => throw new NotImplementedException();
-    public void Reset() => throw new NotImplementedException();
-}
-
 /// <summary>cenkalti ZeroBackOff: retries immediately, forever (until the context ends).</summary>
 public sealed class ZeroBackOff : IBackOff
 {
@@ -54,78 +50,98 @@ public sealed class ZeroBackOff : IBackOff
 /// <summary>Wraps a backoff.BackOff with a token (cenkalti <c>backoff.WithContext</c>).</summary>
 public static class BackOffFactory
 {
-    public static IBackOffContext WithContext(IBackOff backOff, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>cenkalti <c>backoff.WithContext(b, ctx)</c>.</summary>
+    public static IBackOffContext WithContext(IBackOff backOff, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(backOff);
+        if (backOff is BackOffContext existing)
+        {
+            // cenkalti: re-wrap the inner backoff with the new context instead of stacking wrappers
+            return new BackOffContext(existing.Inner, ct);
+        }
+
+        return new BackOffContext(backOff, ct);
+    }
 
     /// <summary>Go: time.NewBackOff(ctx) -- 100ms initial interval, never stops.</summary>
-    public static IBackOffContext NewBackOff(CancellationToken ct) => throw new NotImplementedException();
+    public static IBackOffContext NewBackOff(CancellationToken ct) => NewBackOffWithInitialInterval(ct, DefaultInitialInterval);
 
     /// <summary>Go: time.NewBackOffWithInitialInterval(ctx, interval).</summary>
     public static IBackOffContext NewBackOffWithInitialInterval(CancellationToken ct, TimeSpan initialInterval)
-        => throw new NotImplementedException();
+        => WithContext(new ExponentialBackOff
+        {
+            InitialInterval = initialInterval,
+            RandomizationFactor = BackOffConstants.DefaultRandomizationFactor,
+            Multiplier = BackOffConstants.DefaultMultiplier,
+            MaxInterval = BackOffConstants.DefaultMaxInterval,
+            MaxElapsedTime = TimeSpan.Zero, // Never stop trying
+        }, ct);
 
     public static readonly TimeSpan DefaultInitialInterval = TimeSpan.FromMilliseconds(100);
     public static readonly TimeSpan SlowInitialInterval = TimeSpan.FromSeconds(10);
+
+    /// <summary>cenkalti's unexported <c>backOffContext</c>.</summary>
+    private sealed class BackOffContext : IBackOffContext
+    {
+        public BackOffContext(IBackOff inner, CancellationToken ct)
+        {
+            Inner = inner;
+            Context = ct;
+        }
+
+        public IBackOff Inner { get; }
+        public CancellationToken Context { get; }
+
+        public TimeSpan NextBackOff() => Context.IsCancellationRequested ? BackOffConstants.Stop : Inner.NextBackOff();
+
+        public void Reset() => Inner.Reset();
+    }
+
+    /// <summary>cenkalti <c>getContext(b)</c>.</summary>
+    internal static CancellationToken GetContext(IBackOff backOff)
+        => backOff is IBackOffContext bc ? bc.Context : CancellationToken.None;
 }
 
 /// <summary>Go: time.ConcurrentBackOff -- mutex-protected wrapper.</summary>
 public sealed class ConcurrentBackOff : IBackOffContext
 {
-    public ConcurrentBackOff(IBackOff inner) => throw new NotImplementedException();
-    public CancellationToken Context => throw new NotImplementedException();
-    public TimeSpan NextBackOff() => throw new NotImplementedException();
-    public void Reset() => throw new NotImplementedException();
-}
+    private readonly object _mu = new();
+    private readonly IBackOff _bo;
 
-/// <summary>Go: time.Jitter(interval, maxDeviation).</summary>
-public static class Jitter
-{
-    public static TimeSpan Apply(TimeSpan interval, TimeSpan maxDeviation) => throw new NotImplementedException();
-}
+    public ConcurrentBackOff(IBackOff inner)
+    {
+        ArgumentNullException.ThrowIfNull(inner);
+        _bo = inner;
+    }
 
-/// <summary>cenkalti <c>backoff.Timer</c> -- waits between attempts; Fires early if the owner wants (see ShardMapTimer).</summary>
-public interface IRetryTimer
-{
-    void Start(TimeSpan duration);
-    void Stop();
-    /// <summary>Completes when the started timer fires. Cancellation -> OperationCanceledException.</summary>
-    ValueTask WaitAsync(CancellationToken ct);
-}
+    /// <summary>
+    /// Exposes the context of the wrapped backoff.  The retry loop only interrupts its wait between retries through an
+    /// <see cref="IBackOffContext"/>, so without it a cancelled token would not stop the wait.
+    /// </summary>
+    public CancellationToken Context
+    {
+        get
+        {
+            lock (_mu)
+            {
+                return _bo is IBackOffContext bc ? bc.Context : CancellationToken.None;
+            }
+        }
+    }
 
-/// <summary>cenkalti <c>backoff.Permanent(err)</c>: stops the retry loop; the loop throws/returns <see cref="Inner"/>.</summary>
-public sealed class PermanentException : Exception
-{
-    public Exception Inner { get; }
-    public PermanentException(Exception inner) : base(inner.Message, inner) => Inner = inner;
-}
+    public TimeSpan NextBackOff()
+    {
+        lock (_mu)
+        {
+            return _bo.NextBackOff();
+        }
+    }
 
-/// <summary>
-/// cenkalti retry loop.  Semantics (must match v4.3.0): Reset() the backoff once; run the operation; on success return;
-/// on PermanentException throw its Inner; otherwise next = backOff.NextBackOff(); if next == Stop then (if the token
-/// of an IBackOffContext is cancelled throw OperationCanceledException, else rethrow the last error); call notify(err,
-/// next); start the timer; wait for the timer or token (token -> throw OperationCanceledException).
-/// The operation signals failure by THROWING (RpcException etc.); callers translate with OxiaErrors.FromGrpcError.
-/// </summary>
-public static class Retry
-{
-    public static ValueTask<T> RetryNotifyWithTimerAsync<T>(Func<ValueTask<T>> operation, IBackOff backOff,
-        Action<Exception, TimeSpan>? notify, IRetryTimer? timer, CancellationToken ct = default)
-        => throw new NotImplementedException();
-
-    public static ValueTask RetryNotifyWithTimerAsync(Func<ValueTask> operation, IBackOff backOff,
-        Action<Exception, TimeSpan>? notify, IRetryTimer? timer, CancellationToken ct = default)
-        => throw new NotImplementedException();
-
-    public static ValueTask<T> RetryNotifyAsync<T>(Func<ValueTask<T>> operation, IBackOff backOff,
-        Action<Exception, TimeSpan>? notify, CancellationToken ct = default)
-        => RetryNotifyWithTimerAsync(operation, backOff, notify, null, ct);
-
-    public static ValueTask RetryNotifyAsync(Func<ValueTask> operation, IBackOff backOff,
-        Action<Exception, TimeSpan>? notify, CancellationToken ct = default)
-        => RetryNotifyWithTimerAsync(operation, backOff, notify, null, ct);
-
-    public static ValueTask<T> RetryAsync<T>(Func<ValueTask<T>> operation, IBackOff backOff, CancellationToken ct = default)
-        => RetryNotifyWithTimerAsync(operation, backOff, null, null, ct);
-
-    public static ValueTask RetryAsync(Func<ValueTask> operation, IBackOff backOff, CancellationToken ct = default)
-        => RetryNotifyWithTimerAsync(operation, backOff, null, null, ct);
+    public void Reset()
+    {
+        lock (_mu)
+        {
+            _bo.Reset();
+        }
+    }
 }
