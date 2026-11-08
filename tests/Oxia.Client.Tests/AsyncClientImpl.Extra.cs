@@ -68,7 +68,7 @@ public class AsyncClientImplExtraTests
         var shardManager = new StaticShardManager { Shards = [0] };
         var batcher = new AnsweringBatcher(inline);
         var c = new AsyncClientImpl { ShardManager = shardManager };
-        c.WriteBatchManager = new WriteManager(CancellationToken.None, (_, _) => batcher, c.ForwardWrite);
+        c.WriteBatchManager = new WriteManager(CancellationToken.None, (_, _) => batcher, c.ForwardWriteAsync);
         c.ReadBatchManager = new Manager(CancellationToken.None, (_, _) => batcher);
         return c;
     }
@@ -187,14 +187,22 @@ public class AsyncClientImplExtraTests
     [Fact]
     public async Task PutGetDelete_AllocateNothingPerOperation_WhenTheBatcherCompletesInline()
     {
+#if DEBUG
+        Assert.Skip("allocation budgets only mean something in Release (dotnet test -c Release)");
+#endif
         var client = NewAnsweringClient(inline: true);
         var value = V;
 
-        for (int i = 0; i < 20_000; i++)
+        // Warm up: pools, and the tiered JIT (unoptimised code allocates things the optimised one does not)
+        for (int round = 0; round < 4; round++)
         {
-            await client.PutAsync("key", value);
-            await client.GetAsync("key");
-            await client.DeleteAsync("key");
+            for (int i = 0; i < 20_000; i++)
+            {
+                await client.PutAsync("key", value);
+                await client.GetAsync("key");
+                await client.DeleteAsync("key");
+            }
+            await Task.Delay(250);
         }
 
         // The answering batcher itself allocates the response objects of the fake server: measure those and subtract
@@ -258,17 +266,31 @@ public class AsyncClientImplExtraTests
         Assert.Contains("partitionKey is required", ex.Message);
     }
 
+    // (xUnit would replace the lone surrogates of InlineData strings by U+FFFD: the keys are looked up by index)
+    private static readonly (string Key, bool Valid)[] ValidateKeyCases =
+    [
+        ("", true),
+        ("plain/ascii", true),
+        ("ключ/日本", true),
+        ("emoji-😀-pair", true),
+        ("lone-high-\uD83D", false),
+        ("\uDE00-lone-low", false),
+        ("high-then-high-\uD83D😀", false),
+        ("swapped-\uDE00\uD83D", false),
+    ];
+
     [Theory]
-    [InlineData("", true)]
-    [InlineData("plain/ascii", true)]
-    [InlineData("ключ/日本", true)]
-    [InlineData("emoji-😀-pair", true)]
-    [InlineData("lone-high-\uD83D", false)]
-    [InlineData("\uDE00-lone-low", false)]
-    [InlineData("high-then-high-\uD83D😀", false)]
-    [InlineData("swapped-\uDE00\uD83D", false)]
-    public void ValidateKey_RejectsLoneSurrogates(string key, bool valid)
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    public void ValidateKey_RejectsLoneSurrogates(int index)
     {
+        var (key, valid) = ValidateKeyCases[index];
         Assert.Equal(valid, AsyncClientImpl.IsValidUtf16(key));
         Assert.Equal(valid, AsyncClientImpl.ValidateKey(key) is null);
     }

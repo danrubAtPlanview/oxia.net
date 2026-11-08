@@ -461,7 +461,7 @@ public class AsyncClientImplTests
     {
         var (client, _) = NewWriteTestClient(new StaticShardManager { Shards = [0] });
         // Go: PanicsWithValue("invalid call")
-        var ex = Assert.Throws<InvalidOperationException>(() => client.ForwardWrite(0, new GetCall { Key = "a" }));
+        var ex = Assert.Throws<InvalidOperationException>(() => { _ = client.ForwardWriteAsync(0, new GetCall { Key = "a" }); });
         Assert.Equal("invalid call", ex.Message);
     }
 

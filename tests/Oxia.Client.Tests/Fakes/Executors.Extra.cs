@@ -165,7 +165,7 @@ internal sealed class SplitExecutor : IExecutor
             OxiaOptions.DefaultMaxRequestsPerBatch, new MetricsImpl(null), OxiaOptions.DefaultRequestTimeout);
         batcherFactory.WriteRerouter = c.RerouteWrites;
         c.WriteBatchManager = new WriteManager(CancellationToken.None,
-            (ct, shard) => batcherFactory.NewWriteBatcher(ct, shard, OxiaOptions.DefaultMaxBatchSize), c.ForwardWrite);
+            (ct, shard) => batcherFactory.NewWriteBatcher(ct, shard, OxiaOptions.DefaultMaxBatchSize), c.ForwardWriteAsync);
         shardManager.OnShardsReplaced = c.WriteBatchManager.ShardsReplaced;
         return c;
     }

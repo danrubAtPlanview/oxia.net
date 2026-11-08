@@ -79,7 +79,7 @@ internal static class TestClients
             var b = new CapturingWriteBatcher();
             batchers[shardId] = b;
             return b;
-        }, c.ForwardWrite);
+        }, c.ForwardWriteAsync);
         return (c, batchers);
     }
 

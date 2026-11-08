@@ -57,16 +57,17 @@ internal sealed class AsyncClientImpl : IAsyncClient
     /// <summary>Go: cancel.</summary>
     internal CancellationTokenSource? CtxSource;
 
+    /// <summary>Released with the client (it disposes the Meter it created when no IMeterFactory was supplied).</summary>
+    internal MetricsImpl? Metrics;
+
     private readonly object _notificationsLock = new();
     private readonly Action<long, object> _handOff;
-    private readonly Action<long, object> _forward;
     private int _streamTasks;
 
     /// <summary>A client with no collaborators, to be filled in field by field (Go: a clientImpl literal in the tests).</summary>
     internal AsyncClientImpl()
     {
         _handOff = HandOffToWriteManager;
-        _forward = AddToWriteManager;
     }
 
     internal AsyncClientImpl(ClientOptions options) : this()
@@ -95,18 +96,19 @@ internal sealed class AsyncClientImpl : IAsyncClient
         var rpcProvider = RpcProviderImpl.Create(c.Ctx, options.Namespace, options.Tls, options.Authentication,
             options.ServiceAddress, () => shardManager, grpcDialOptions);
 
+        c.Metrics = new MetricsImpl(options.MeterFactory);
         var batcherFactory = new BatcherFactory(
             rpcProvider,
             options.Namespace,
             options.BatchLinger,
             options.MaxRequestsPerBatch,
-            new MetricsImpl(options.MeterFactory),
+            c.Metrics,
             options.RequestTimeout);
         batcherFactory.WriteRerouter = c.RerouteWrites;
         batcherFactory.ReadRerouter = c.RerouteReads;
         // The shard manager tells the write batchers when shards are replaced
         c.WriteBatchManager = new WriteManager(c.Ctx,
-            (ct, shard) => batcherFactory.NewWriteBatcher(ct, shard, options.MaxBatchSize), c.ForwardWrite);
+            (ct, shard) => batcherFactory.NewWriteBatcher(ct, shard, options.MaxBatchSize), c.ForwardWriteAsync);
 
         try
         {
@@ -125,6 +127,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
         {
             c.CtxSource!.Cancel();
             try { await rpcProvider.CloseAsync().ConfigureAwait(false); } catch { /* Go: _ = rpcProvider.Close() */ }
+            c.Metrics.Dispose();
             throw;
         }
         c.RpcProvider = rpcProvider;
@@ -155,8 +158,32 @@ internal sealed class AsyncClientImpl : IAsyncClient
         }
     }
 
-    /// <summary>Go: forwardWrite -- sends a call that was routed to a shard with the shard map from before the shard was removed to the shards that replaced it.</summary>
-    internal void ForwardWrite(long removedShardId, object call) => SendToSuccessors(removedShardId, call, _forward);
+    /// <summary>
+    /// Go: forwardWrite -- sends a call that was routed to a shard with the shard map from before the shard was removed to the
+    /// shards that replaced it, with Add.  The routing (and the "invalid call" failure) is synchronous; the returned task
+    /// completes once the successors accepted the call (they may hold it until the removed shard handed off its calls).
+    /// </summary>
+    internal ValueTask ForwardWriteAsync(long removedShardId, object call)
+    {
+        List<(long ShardId, object Call)>? sends = null;
+        SendToSuccessors(removedShardId, call, (shardId, c) => (sends ??= new List<(long, object)>(1)).Add((shardId, c)));
+        return sends is null ? ValueTask.CompletedTask : AddAllAsync(sends);
+    }
+
+    private async ValueTask AddAllAsync(List<(long ShardId, object Call)> sends)
+    {
+        foreach (var (shardId, call) in sends)
+        {
+            try
+            {
+                await WriteBatchManager.AddAsync(shardId, call).ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                FailCall(call, e);
+            }
+        }
+    }
 
     /// <summary>
     /// Go: sendToSuccessors -- sends a call for a removed shard to the shard that replaced it for the call's key, or, for a
@@ -211,15 +238,10 @@ internal sealed class AsyncClientImpl : IAsyncClient
         var callback = MultiShardDeleteRangeCallback(successors.Length, call.Complete);
         foreach (var shardId in successors)
         {
-            // One copy per shard: every batch writes its own OpIndex into the call (Go passed the struct by value)
-            send(shardId, new DeleteRangeCall
-            {
-                MinKeyInclusive = call.MinKeyInclusive,
-                MaxKeyExclusive = call.MaxKeyExclusive,
-                PartitionKey = call.PartitionKey,
-                CallContext = call.CallContext,
-                Callback = callback,
-            });
+            // One copy per shard (Go passed the struct by value): every batch writes its own OpIndex into the call it is given
+            var copy = call.Clone();
+            copy.Callback = callback;
+            send(shardId, copy);
         }
     }
 
@@ -330,6 +352,8 @@ internal sealed class AsyncClientImpl : IAsyncClient
         {
             try { await n.CloseAsync().ConfigureAwait(false); } catch (Exception e) { (errors ??= []).Add(e); }
         }
+
+        try { Metrics?.Dispose(); } catch (Exception e) { (errors ??= []).Add(e); }
 
         if (errors is not null)
         {
