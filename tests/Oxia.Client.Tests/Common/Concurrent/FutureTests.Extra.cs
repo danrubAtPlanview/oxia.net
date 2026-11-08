@@ -84,13 +84,17 @@ public class FutureExtraTests
     [Fact]
     public async Task FailingWithASharedSentinelThrowsAFreshExceptionThatMatchesIs()
     {
+        // A private OxiaException plays the shared sentinel: the real OxiaErrors.SessionNotFound is process-wide state, and other tests
+        // (e.g. SessionsTests.TestClientSessionClose("session-not-found") completes a ValueTask.FromException with it, which stamps
+        // its StackTrace when awaited) make "StackTrace is null" depend on the order in which the whole suite runs.
+        var sentinel = new OxiaException("oxia: private sentinel of this test");
         var f = new Future<int>();
-        f.Fail(OxiaErrors.SessionNotFound);
+        f.Fail(sentinel);
 
         var thrown = await Assert.ThrowsAnyAsync<Exception>(async () => await f.WaitAsync(CancellationToken.None));
-        Assert.NotSame(OxiaErrors.SessionNotFound, thrown);
-        Assert.True(OxiaErrors.Is(thrown, OxiaErrors.SessionNotFound));
-        Assert.Null(OxiaErrors.SessionNotFound.StackTrace); // the shared instance was never thrown
+        Assert.NotSame(sentinel, thrown);
+        Assert.True(OxiaErrors.Is(thrown, sentinel));
+        Assert.Null(sentinel.StackTrace); // the shared instance was never thrown
     }
 
     [Fact]

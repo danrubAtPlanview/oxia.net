@@ -33,6 +33,11 @@ public sealed class MockOxiaState
 
     public TaskCompletionSource<bool> Cancellation(string id) => ServerSawCancellation.GetOrAdd(id, _ => new(TaskCreationOptions.RunContinuationsAsynchronously));
 
+    /// <summary>Set by the mock when the handler of the blocking call <c>id</c> started, i.e. the call reached the server (a client-side sleep cannot guarantee that on a loaded machine).</summary>
+    public ConcurrentDictionary<string, TaskCompletionSource<bool>> ServerStarted { get; } = new();
+
+    public TaskCompletionSource<bool> Started(string id) => ServerStarted.GetOrAdd(id, _ => new(TaskCreationOptions.RunContinuationsAsynchronously));
+
     public static RpcException NotLeader() => OxiaErrors.IntoGrpcStatusError(OxiaErrors.NodeIsNotLeader, OxiaErrors.WithLeaderHint(3, "leader.example:6648"))!;
 }
 
@@ -212,6 +217,7 @@ public sealed class MockOxiaClientService : G.OxiaClient.OxiaClientBase
 
     private async Task BlockUntilCancelled(string id, ServerCallContext context)
     {
+        _state.Started(id).TrySetResult(true);
         try
         {
             await Task.Delay(Timeout.Infinite, context.CancellationToken);
@@ -340,7 +346,7 @@ public class OxiaClientRpcTests : IClassFixture<OxiaClientRpcFixture>
     {
         using var cts = new CancellationTokenSource();
         Task<CreateSessionResponse> call = _f.Rpc.CreateSessionAsync(new CreateSessionRequest { ClientIdentity = "slow" }, cts.Token).AsTask();
-        await Task.Delay(100);
+        await _f.State.Started("slow-unary").Task.WaitAsync(Timeout5s);   // the call is in flight on the server (a 100 ms sleep is not a guarantee under load)
         Assert.False(call.IsCompleted);
         cts.Cancel();
         Exception ex = await Assert.ThrowsAnyAsync<Exception>(() => call.WaitAsync(Timeout5s));
@@ -551,7 +557,7 @@ public class OxiaClientRpcTests : IClassFixture<OxiaClientRpcFixture>
         req.Gets.Add(new GetRequest { Key = "block-token" });
         using var stream = _f.Rpc.Read(req, cts.Token);
         Task<ReadResponse?> pending = stream.RecvAsync().AsTask();
-        await Task.Delay(150);
+        await _f.State.Started("block-token").Task.WaitAsync(Timeout5s);   // the call is in flight on the server
         Assert.False(pending.IsCompleted);
         cts.Cancel();
         Exception ex = await Assert.ThrowsAnyAsync<Exception>(() => pending.WaitAsync(Timeout5s));
@@ -576,7 +582,7 @@ public class OxiaClientRpcTests : IClassFixture<OxiaClientRpcFixture>
     {
         var stream = _f.Rpc.GetSequenceUpdates(new GetSequenceUpdatesRequest { Key = "block-dispose" }, default);
         Task<GetSequenceUpdatesResponse?> pending = stream.RecvAsync().AsTask();
-        await Task.Delay(150);
+        await _f.State.Started("block-dispose").Task.WaitAsync(Timeout5s);   // the call is in flight on the server
         Assert.False(pending.IsCompleted);
         stream.Dispose();
         await _f.State.Cancellation("block-dispose").Task.WaitAsync(Timeout5s);
@@ -700,7 +706,7 @@ public class OxiaClientRpcTests : IClassFixture<OxiaClientRpcFixture>
         req.Puts.Add(new PutRequest { Key = "block" });
         await call.SendAsync(req);
         Task<WriteResponse?> pending = call.RecvAsync().AsTask();
-        await Task.Delay(150);
+        await _f.State.Started("ws-36").Task.WaitAsync(Timeout5s);   // the batch reached the server and it is blocking on it
         Assert.False(context.IsCancellationRequested);
         cts.Cancel();
         Exception ex = await Assert.ThrowsAnyAsync<Exception>(() => pending.WaitAsync(Timeout5s));
@@ -718,7 +724,7 @@ public class OxiaClientRpcTests : IClassFixture<OxiaClientRpcFixture>
         req.Puts.Add(new PutRequest { Key = "block" });
         await call.SendAsync(req);
         Task<WriteResponse?> pending = call.RecvAsync().AsTask();
-        await Task.Delay(150);
+        await _f.State.Started("ws-37").Task.WaitAsync(Timeout5s);   // the batch reached the server and it is blocking on it
         call.Dispose();
         Assert.True(context.IsCancellationRequested);
         Assert.True(call.Context.IsCancellationRequested);   // still usable after Dispose
