@@ -37,6 +37,16 @@ public interface IMessageCodec<TMessage> where TMessage : class
     static abstract void MergeFrom(ref ProtoReader reader, TMessage message);
 }
 
+/// <summary>
+/// A codec of a RESPONSE message that comes from a pool: the gRPC deserializer rents the message instead of allocating it, and the
+/// final consumer gives it back with <c>Release()</c> (see docs/performance-allocation.md).
+/// </summary>
+public interface IPooledMessageCodec<TMessage> : IMessageCodec<TMessage> where TMessage : class
+{
+    /// <summary>A message from the pool (or a new one), ready to be parsed into; the consumer releases it.</summary>
+    static abstract TMessage Rent();
+}
+
 /// <summary>Generic entry points over <see cref="IMessageCodec{TMessage}"/> (the per-message codec classes forward to these).</summary>
 public static class MessageCodec
 {

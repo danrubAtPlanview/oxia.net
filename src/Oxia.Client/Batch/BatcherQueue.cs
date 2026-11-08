@@ -89,10 +89,7 @@ internal sealed class ConsumerSignal : IValueTaskSource<bool>, IThreadPoolWorkIt
 
     internal ValueTask<bool> Wait() => new(this, _core.Version);
 
-    /// <summary>EXPERIMENT (benchmarks): queue the wake-up on the local queue of the producer's thread.</summary>
-    internal static bool PreferLocal;
-
-    internal void Set() => ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: PreferLocal);
+    internal void Set() => ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
 
     void IThreadPoolWorkItem.Execute() => _core.SetResult(true);
 

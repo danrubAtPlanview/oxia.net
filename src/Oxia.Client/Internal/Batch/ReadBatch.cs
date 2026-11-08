@@ -6,6 +6,10 @@
 //              If the shard is gone from the shard map (ErrShardNotFound) and a rerouter is set, the gets are re-routed to
 //              the shards that replaced it instead of failing.  Any other error fails every get.
 //   Divergences:
+//      * Wave 2 / Z1: the batch is the CONSUMER of the pooled ReadResponse -- it releases it after the gets took what they need (value
+//        arrays are the caller's, leases of the pooled read API were detached); a batch holding a pooled-value get (Oxia.Client.Pooled)
+//        asks the transport for pooled values (ReadRequest.PooledValues); per-call completions are wrapped like in WriteBatch
+//        (SafeComplete) and a throwing rerouter is logged and dropped.
 //      * `Complete()` is `CompleteAsync()`; Go's `(response, error)` from the executor is a ValueTask<ReadResponse> that
 //        throws: the exception is the error (caught once, in CompleteAsync; the failure path may allocate).
 //      * The batch is POOLED: it implements IRecyclableBatch and the batcher gives it back after CompleteAsync / Fail; the
@@ -22,9 +26,11 @@
 //      * `slog.Info("Shard was split/merged, ...")` goes through Oxia.Common.Logging.OxiaLog (category oxia.batch).
 //      * `namespace` is carried but, like in Go, unused.
 // =====================================================================================================================
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
 using Oxia.Client.Batch;
 using Oxia.Client.Internal.Model;
+using Oxia.Client.Pooled;
 using Oxia.Common.Constant;
 using Oxia.Common.Logging;
 using Oxia.Common.Proto;
@@ -70,6 +76,7 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
     private long _shardId;
     private bool _recordMetrics;
     private long _batchStart;
+    private bool _pooledValues;
 
     internal ReadBatch(ReadBatchFactory factory) => _factory = factory;
 
@@ -90,11 +97,15 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
             throw new InvalidOperationException("invalid call");
         }
         var metrics = _factory.Metrics;
+        // The opt-in pooled read API: ONE pooled call makes the server's values land in leases for the whole response (checked on the
+        // call itself, a metrics decorator is a plain copy)
+        if (get is IPooledValueCall) _pooledValues = true;
         _gets.Add(metrics is null ? get : metrics.DecorateGet(get));
     }
 
     public int Size => _gets.Count;
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask CompleteAsync()
     {
         var metrics = _factory.Metrics;
@@ -131,7 +142,19 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
                 _factory.Log.LogInformation("Shard was split/merged, re-routing read batch operations shard={Shard} gets={Gets}",
                     _shardId, _gets.Count);
             }
-            reroute(new List<GetCall>(_gets));
+            // From here on the rerouter owns the gets: what it throws must not reach the batcher's catch-all, which would fail the
+            // gets that were handed off already
+            try
+            {
+                reroute(new List<GetCall>(_gets));
+            }
+            catch (Exception e)
+            {
+                if (_factory.Log.IsEnabled(LogLevel.Error))
+                {
+                    _factory.Log.LogError(e, "Re-routing the read batch operations failed (shard {Shard})", _shardId);
+                }
+            }
             return;
         }
 
@@ -146,7 +169,15 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
         }
         else
         {
-            Handle(response!);
+            try
+            {
+                Handle(response!);
+            }
+            finally
+            {
+                // Every get took what it needs (value arrays are the caller's, leases were detached): recycle the response graph
+                response!.Release();
+            }
         }
     }
 
@@ -154,7 +185,20 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
     {
         for (int i = 0; i < _gets.Count; i++)
         {
-            _gets[i].Complete(null, error);
+            SafeComplete(_gets[i], null, error);
+        }
+    }
+
+    // See WriteBatch.SafeComplete: a completion that throws must not stop the other gets nor reach the batcher's catch-all.
+    private void SafeComplete(GetCall call, GetResponse? response, Exception? error)
+    {
+        try { call.Complete(response, error); }
+        catch (Exception e)
+        {
+            if (_factory.Log.IsEnabled(LogLevel.Error))
+            {
+                _factory.Log.LogError(e, "A read completion callback threw; the exception was ignored (shard {Shard})", _shardId);
+            }
         }
     }
 
@@ -165,11 +209,11 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
         {
             if (i < results.Count)
             {
-                _gets[i].Complete(results[i], null);
+                SafeComplete(_gets[i], results[i], null);
             }
             else
             {
-                _gets[i].Complete(null, new OxiaException("the read response has fewer results than the read request has gets"));
+                SafeComplete(_gets[i], null, new OxiaException("the read response has fewer results than the read request has gets"));
             }
         }
     }
@@ -179,6 +223,7 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
     {
         _request.Reset();
         _request.Shard = _shardId;
+        _request.PooledValues = _pooledValues;
         for (int i = 0; i < _gets.Count; i++)
         {
             _request.Gets.Add(_gets[i]);
@@ -190,6 +235,7 @@ internal sealed class ReadBatch : IBatch, IRecyclableBatch
     {
         _gets.Clear();
         _request.Reset();
+        _pooledValues = false;
         _recordMetrics = false;
         _factory.Return(this);
     }

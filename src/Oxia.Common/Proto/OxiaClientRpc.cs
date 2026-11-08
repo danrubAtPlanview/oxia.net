@@ -9,6 +9,11 @@
 //              Google.Protobuf objects, no intermediate byte[].  Every Recv/Send/unary failure passes through
 //              OxiaErrors.FromGrpcError, exactly like Go's Oxia* stream wrappers.
 //   Divergences:
+//      * Wave 2 / Z1: Read / RangeScan use the pooled-value method descriptors when the request asks for them (PooledValues); the
+//        stream wrappers use the pooling async method builder and, when the call goes through the metrics interceptor, its
+//        allocation-free observed reads / writes (IObservedStreamReader / Writer) instead of Task<bool> wrappers; SendAsync on a
+//        stream the server already ended throws TranslatedGrpcException(EndOfStream) -- Go's io.EOF, retryable -- unless the failure is
+//        the client's own (token cancelled).
 //      * Go `Recv() (msg, io.EOF)` is `RecvAsync()` returning null at the end of the stream; failures are thrown.
 //      * Error translation KEEPS the original exception: when FromGrpcError maps the failure to an Oxia sentinel, the
 //        thrown exception is a TranslatedGrpcException whose Message is the sentinel's, which satisfies
@@ -24,6 +29,7 @@
 //        Dispose, or the parent token was cancelled); gRPC.NET offers no "call finished" event to hook otherwise.
 // =====================================================================================================================
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using Grpc.Core;
 using Oxia.Common.Constant;
 using Oxia.Common.Proto;
@@ -96,13 +102,15 @@ public sealed class OxiaClientRpc : IOxiaClientRpc
         => new WriteStreamCall(_invoker.AsyncDuplexStreamingCall(OxiaClientMethods.WriteStream, null, new CallOptions(headers, cancellationToken: ct)), ct);
 
     public IServerStreamingClient<ReadResponse> Read(ReadRequest request, CancellationToken ct)
-        => new ServerStreamingClient<ReadResponse>(_invoker.AsyncServerStreamingCall(OxiaClientMethods.Read, null, new CallOptions(cancellationToken: ct), request));
+        => new ServerStreamingClient<ReadResponse>(_invoker.AsyncServerStreamingCall(
+            request.PooledValues ? OxiaClientMethods.ReadPooled : OxiaClientMethods.Read, null, new CallOptions(cancellationToken: ct), request));
 
     public IServerStreamingClient<ListResponse> List(ListRequest request, CancellationToken ct)
         => new ServerStreamingClient<ListResponse>(_invoker.AsyncServerStreamingCall(OxiaClientMethods.List, null, new CallOptions(cancellationToken: ct), request));
 
     public IServerStreamingClient<RangeScanResponse> RangeScan(RangeScanRequest request, CancellationToken ct)
-        => new ServerStreamingClient<RangeScanResponse>(_invoker.AsyncServerStreamingCall(OxiaClientMethods.RangeScan, null, new CallOptions(cancellationToken: ct), request));
+        => new ServerStreamingClient<RangeScanResponse>(_invoker.AsyncServerStreamingCall(
+            request.PooledValues ? OxiaClientMethods.RangeScanPooled : OxiaClientMethods.RangeScan, null, new CallOptions(cancellationToken: ct), request));
 
     public IServerStreamingClient<ShardAssignments> GetShardAssignments(ShardAssignmentsRequest request, CancellationToken ct)
         => new ServerStreamingClient<ShardAssignments>(_invoker.AsyncServerStreamingCall(OxiaClientMethods.GetShardAssignments, null, new CallOptions(cancellationToken: ct), request));
@@ -179,11 +187,16 @@ internal sealed class ServerStreamingClient<T> : IServerStreamingClient<T> where
         _reader = call.ResponseStream;
     }
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<T?> RecvAsync(CancellationToken ct = default)
     {
         try
         {
-            return await _reader.MoveNext(ct).ConfigureAwait(false) ? _reader.Current : null;
+            // The metrics-intercepted stream observes the message with a pooled awaiter (no Task per message)
+            bool has = _reader is IObservedStreamReader<T> observed
+                ? await observed.MoveNextObserved(ct).ConfigureAwait(false)
+                : await _reader.MoveNext(ct).ConfigureAwait(false);
+            return has ? _reader.Current : null;
         }
         catch (Exception ex) when (GrpcErrors.TryTranslate(ex, out Exception? translated))
         {
@@ -241,26 +254,39 @@ internal sealed class WriteStreamCall : IWriteStreamCall
         if (Interlocked.Exchange(ref _ended, 1) == 0) Volatile.Read(ref _context)?.Cancel();
     }
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask SendAsync(WriteRequest request, CancellationToken ct = default)
     {
         try
         {
-            if (ct.CanBeCanceled) await _call.RequestStream.WriteAsync(request, ct).ConfigureAwait(false);
+            if (_call.RequestStream is IObservedStreamWriter<WriteRequest> observed) await observed.WriteObserved(request, ct).ConfigureAwait(false);
+            else if (ct.CanBeCanceled) await _call.RequestStream.WriteAsync(request, ct).ConfigureAwait(false);
             else await _call.RequestStream.WriteAsync(request).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             MarkEnded();
             if (GrpcErrors.TryTranslate(ex, out Exception? translated)) throw translated;
-            throw;
+
+            // grpc-go: "On error, SendMsg aborts the stream.  If the error was generated by the client, the status is returned
+            // directly; otherwise, io.EOF is returned and the status of the stream may be discovered using RecvMsg."  A server that ended
+            // the stream (whatever status it ended with) is an io.EOF -- retryable, the write goes to a new stream; the receive loop
+            // reports the real status.  The original failure stays reachable as the inner exception (status code, leader hints).
+            if (ct.IsCancellationRequested || _parent.IsCancellationRequested || ex is OperationCanceledException) throw;
+            throw new TranslatedGrpcException(OxiaErrors.EndOfStream, ex);
         }
     }
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<WriteResponse?> RecvAsync(CancellationToken ct = default)
     {
         try
         {
-            if (await _call.ResponseStream.MoveNext(ct).ConfigureAwait(false)) return _call.ResponseStream.Current;
+            var reader = _call.ResponseStream;
+            bool has = reader is IObservedStreamReader<WriteResponse> observed
+                ? await observed.MoveNextObserved(ct).ConfigureAwait(false)
+                : await reader.MoveNext(ct).ConfigureAwait(false);
+            if (has) return reader.Current;
             MarkEnded();
             return null;
         }

@@ -62,9 +62,10 @@ public readonly struct ListRequestCodec : IMessageCodec<ListRequest>
     public static void Parse(in ReadOnlySequence<byte> data, ListRequest m) => MessageCodec.Parse<ListRequestCodec, ListRequest>(in data, m);
 }
 
-public readonly struct ListResponseCodec : IMessageCodec<ListResponse>
+public readonly struct ListResponseCodec : IPooledMessageCodec<ListResponse>
 {
     public static ListResponse Create() => new();
+    public static ListResponse Rent() => ListResponse.Rent();
     public static void Reset(ListResponse m) => m.Reset();
 
     public static int Size(ListResponse m)
@@ -154,9 +155,10 @@ public readonly struct RangeScanRequestCodec : IMessageCodec<RangeScanRequest>
     public static void Parse(in ReadOnlySequence<byte> data, RangeScanRequest m) => MessageCodec.Parse<RangeScanRequestCodec, RangeScanRequest>(in data, m);
 }
 
-public readonly struct RangeScanResponseCodec : IMessageCodec<RangeScanResponse>
+public readonly struct RangeScanResponseCodec : IPooledMessageCodec<RangeScanResponse>
 {
     public static RangeScanResponse Create() => new();
+    public static RangeScanResponse Rent() => RangeScanResponse.Rent();
     public static void Reset(RangeScanResponse m) => m.Reset();
 
     public static int Size(RangeScanResponse m)
@@ -204,4 +206,38 @@ public readonly struct RangeScanResponseCodec : IMessageCodec<RangeScanResponse>
     public static void Write(RangeScanResponse m, IBufferWriter<byte> output) => MessageCodec.Write<RangeScanResponseCodec, RangeScanResponse>(m, output);
     public static void Parse(ReadOnlySpan<byte> data, RangeScanResponse m) => MessageCodec.Parse<RangeScanResponseCodec, RangeScanResponse>(data, m);
     public static void Parse(in ReadOnlySequence<byte> data, RangeScanResponse m) => MessageCodec.Parse<RangeScanResponseCodec, RangeScanResponse>(in data, m);
+}
+
+/// <summary>
+/// <see cref="RangeScanResponseCodec"/> for a scan that asked for pooled values: the records' values and keys are copied into
+/// <see cref="ValueLease"/>s (owned by the consumer) instead of new arrays and strings.  Everything else is the classic codec.
+/// </summary>
+public readonly struct RangeScanResponsePooledCodec : IPooledMessageCodec<RangeScanResponse>
+{
+    public static RangeScanResponse Create() => RangeScanResponseCodec.Create();
+    public static RangeScanResponse Rent() => RangeScanResponse.RentPooledValues();
+    public static void Reset(RangeScanResponse m) => m.Reset();
+    public static int Size(RangeScanResponse m) => RangeScanResponseCodec.Size(m);
+    public static void WriteTo(ref ProtoWriter w, RangeScanResponse m) => RangeScanResponseCodec.WriteTo(ref w, m);
+
+    public static void MergeFrom(ref ProtoReader r, RangeScanResponse m)
+    {
+        while (r.TryReadTag(out uint tag))
+        {
+            switch (tag)
+            {
+                case 10:
+                {
+                    PooledGetResponse g = m.SpareRecords.TryPop() as PooledGetResponse ?? new PooledGetResponse();
+                    long old = r.BeginMessage();
+                    GetResponseCodec.MergeFromPooled(ref r, g);
+                    r.EndMessage(old);
+                    m.Records.Add(g);
+                    break;
+                }
+                case 16: m.EndInclusive = r.ReadBool(); break;
+                default: r.SkipField(tag); break;
+            }
+        }
+    }
 }

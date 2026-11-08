@@ -13,6 +13,8 @@
 //                stream (io.EOF in Go) is handled(OK), any read error is handled(code of the error); a call that cannot be
 //                created is handled(code).
 //   Divergences:
+//      * Wave 2 / Z1: the monitored reader / writer also implement IObservedStreamReader / IObservedStreamWriter (ValueTask + pooled box instead of
+//        a Task + a fresh async state machine per message); OxiaClientRpc uses them when present.  The counters are the same.
 //      * OTel Go meter "oxia" (observable counters over striped adders) -> System.Diagnostics.Metrics.Meter "oxia" with
 //        synchronous Counter<long> instruments of the same names / unit "1" / descriptions; the host picks them up with a
 //        MeterListener or OpenTelemetry's AddMeter("oxia").  The meter can be replaced (tests) through the constructor.
@@ -26,6 +28,7 @@
 // =====================================================================================================================
 using System.Collections.Concurrent;
 using System.Diagnostics.Metrics;
+using System.Runtime.CompilerServices;
 using Grpc.Core;
 using Grpc.Core.Interceptors;
 
@@ -38,6 +41,21 @@ internal enum GrpcRpcType
     ClientStream,
     ServerStream,
     BidiStream,
+}
+
+/// <summary>
+/// The response stream of a monitored call, with a <see cref="ValueTask{TResult}"/> read that observes the message without the Task +
+/// async state machine allocation of <see cref="IAsyncStreamReader{T}.MoveNext"/> wrapping (the typed clients use it when present).
+/// </summary>
+internal interface IObservedStreamReader<T>
+{
+    ValueTask<bool> MoveNextObserved(CancellationToken cancellationToken);
+}
+
+/// <summary>The request stream of a monitored call, with a pooled-awaiter write (see <see cref="IObservedStreamReader{T}"/>).</summary>
+internal interface IObservedStreamWriter<T>
+{
+    ValueTask WriteObserved(T message, CancellationToken cancellationToken);
 }
 
 /// <summary>The client interceptor that exports the grpc_client_* counters.</summary>
@@ -283,9 +301,28 @@ public sealed class GrpcClientMetricsInterceptor : Interceptor
     }
 
     /// <summary>Go: monitoredClientStream.RecvMsg.  A read that completes synchronously costs no allocation.</summary>
-    private sealed class MonitoredStreamReader<T>(IAsyncStreamReader<T> inner, MethodMetrics m) : IAsyncStreamReader<T>
+    private sealed class MonitoredStreamReader<T>(IAsyncStreamReader<T> inner, MethodMetrics m) : IAsyncStreamReader<T>, IObservedStreamReader<T>
     {
         public T Current => inner.Current;
+
+        /// <summary>Same observation as <see cref="MoveNext"/>; a read that has to wait costs a pooled box, not a Task + a fresh state machine.</summary>
+        [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+        public async ValueTask<bool> MoveNextObserved(CancellationToken cancellationToken)
+        {
+            bool hasNext;
+            try
+            {
+                hasNext = await inner.MoveNext(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception e)
+            {
+                m.HandledWith(e);
+                throw;
+            }
+
+            Observe(hasNext);
+            return hasNext;
+        }
 
         public Task<bool> MoveNext(CancellationToken cancellationToken)
         {
@@ -341,8 +378,16 @@ public sealed class GrpcClientMetricsInterceptor : Interceptor
     }
 
     /// <summary>Go: monitoredClientStream.SendMsg.  A write that completes synchronously costs no allocation.</summary>
-    private sealed class MonitoredStreamWriter<T>(IClientStreamWriter<T> inner, MethodMetrics m) : IClientStreamWriter<T>
+    private sealed class MonitoredStreamWriter<T>(IClientStreamWriter<T> inner, MethodMetrics m) : IClientStreamWriter<T>, IObservedStreamWriter<T>
     {
+        /// <summary>Same observation as <see cref="WriteAsync(T)"/> / <see cref="WriteAsync(T, CancellationToken)"/>, with a pooled box.</summary>
+        [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+        public async ValueTask WriteObserved(T message, CancellationToken cancellationToken)
+        {
+            await (cancellationToken.CanBeCanceled ? inner.WriteAsync(message, cancellationToken) : inner.WriteAsync(message)).ConfigureAwait(false);
+            m.Sent();
+        }
+
         public WriteOptions? WriteOptions
         {
             get => inner.WriteOptions;

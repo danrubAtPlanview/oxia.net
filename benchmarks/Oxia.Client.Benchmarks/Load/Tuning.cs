@@ -23,6 +23,9 @@ internal static class Tuning
                     // must be set before the first batcher with a linger exists (the service is process wide): use one run per process
                     Oxia.Client.Batch.LingerTimerService.UseHighResolutionTimer = bool.Parse(value);
                     break;
+                case "proxycache":
+                    Oxia.Common.Rpc.TransportTuning.CacheProxyResolution = bool.Parse(value);
+                    break;
                 case "h2stream":
                     Oxia.Common.Rpc.TransportTuning.Http2StreamWindow = int.Parse(value);
                     break;
@@ -34,12 +37,6 @@ internal static class Tuning
                     break;
                 case "multih2":
                     Oxia.Common.Rpc.TransportTuning.MultipleHttp2Connections = bool.Parse(value);
-                    break;
-                case "signallocal":
-                    Oxia.Client.Batch.ConsumerSignal.PreferLocal = bool.Parse(value);
-                    break;
-                case "inlineresponse":
-                    Oxia.Client.Internal.StreamWrapper.ExperimentInlineResponse = bool.Parse(value);
                     break;
                 case "pipeline":
                     Oxia.Client.Batch.BatcherFactory.ExperimentalMaxInFlightDefault = int.Parse(value);

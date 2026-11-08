@@ -32,6 +32,7 @@ using System.Threading.Channels;
 using Oxia.Client.Internal;
 using Oxia.Client.Internal.Batch;
 using Oxia.Client.Internal.Model;
+using Oxia.Client.Pooled;
 using Oxia.Common;
 using Oxia.Common.Concurrent;
 using Oxia.Common.Constant;
@@ -158,7 +159,14 @@ internal sealed class AsyncClientImpl : IAsyncClient
     {
         foreach (var call in ModelExtensions.InOpIndexOrder(puts, deletes, deleteRanges))
         {
-            SendToSuccessors(removedShardId, call, _handOff);
+            try
+            {
+                SendToSuccessors(removedShardId, call, _handOff);
+            }
+            catch (Exception e)
+            {
+                FailCall(call, e); // this call could not be routed: fail it alone, the others still go
+            }
         }
     }
 
@@ -292,9 +300,16 @@ internal sealed class AsyncClientImpl : IAsyncClient
     {
         foreach (var get in gets)
         {
-            long shardId = ShardManager.Get(get.PartitionKeyOrKey());
-            var add = ReadBatchManager.Get(shardId).AddAsync(get);
-            if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, get);
+            try
+            {
+                long shardId = ShardManager.Get(get.PartitionKeyOrKey());
+                var add = ReadBatchManager.Get(shardId).AddAsync(get);
+                if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, get);
+            }
+            catch (Exception e)
+            {
+                FailCall(get, e); // this get could not be routed: fail it alone, the others still go
+            }
         }
     }
 
@@ -304,7 +319,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
     /// Adds a plain write (no session) of the caller to the batcher of a shard, behind the ephemeral puts of the same caller that still
     /// wait for their session.  Lock-free and allocation-free unless such a put is pending.
     /// </summary>
-    private void AddPlainWrite(long shardId, object call)
+    internal void AddPlainWrite(long shardId, object call)
     {
         if (Sessions is { HasWaitingOperations: true } sessions)
         {
@@ -498,54 +513,15 @@ internal sealed class AsyncClientImpl : IAsyncClient
         }
 
         // If there is no partition key, we will make the request to delete-range on all the shards
-        var shardIds = ShardManager.GetAll();
-        var wg = new WaitGroup(shardIds.Length);
-
-        Action<DeleteRangeResponse?, Exception?> callback = (response, err) =>
-        {
-            if (err is not null)
-            {
-                wg.Fail(err);
-                return;
-            }
-
-            if (response!.Status == Status.Ok)
-            {
-                wg.Done();
-            }
-            else
-            {
-                wg.Fail(ProtoUtils.ToError(response.Status)!);
-            }
-        };
-
-        foreach (var shardId in shardIds)
-        {
-            AddPlainWrite(shardId, new DeleteRangeCall
-            {
-                MinKeyInclusive = minKeyInclusive,
-                MaxKeyExclusive = maxKeyExclusive,
-                // Shared by the calls to all the shards: once one is sent, the others are not dropped anymore
-                CallContext = opts.CallContext,
-                Callback = callback,
-            });
-        }
-        return wg.WaitAsync(Ctx);
+        // (Go: a wait group + a callback closure + one call per shard.  PooledDeleteRange is all of them in one pooled object: the
+        // first failure wins, otherwise every shard answered Ok; the context ends the wait.)
+        return PooledDeleteRange.Start(this, ShardManager.GetAll(), minKeyInclusive, maxKeyExclusive, null, opts.CallContext);
     }
 
     private ValueTask<Exception?> DoSingleShardDeleteRange(long shardId, string minKeyInclusive, string maxKeyExclusive,
         string partitionKey, CallContext? callContext)
     {
-        var call = new DeleteRangeCompletion
-        {
-            MinKeyInclusive = minKeyInclusive,
-            MaxKeyExclusive = maxKeyExclusive,
-            PartitionKey = partitionKey,
-            CallContext = callContext,
-        };
-        var result = call.AsValueTask();
-        AddPlainWrite(shardId, call);
-        return result;
+        return PooledDeleteRange.Start(this, [shardId], minKeyInclusive, maxKeyExclusive, partitionKey, callContext);
     }
 
     // -----------------------------------------------------------------------------------------------------------------

@@ -35,7 +35,9 @@ public readonly struct GetRequestCodec : IMessageCodec<GetRequest>
         int size = m.CachedSize;
         if (size > ProtoWriter.BlockLimit)
         {
+            long start = w.BytesWritten;
             WriteChunked(ref w, m);
+            if (w.BytesWritten - start != size) ThrowStale();
             return;
         }
         Span<byte> d = w.Reserve(size);
@@ -49,7 +51,9 @@ public readonly struct GetRequestCodec : IMessageCodec<GetRequest>
         if (size > ProtoWriter.BlockLimit)
         {
             w.WriteTagLength(tag, size);
+            long start = w.BytesWritten;
             WriteChunked(ref w, m);
+            if (w.BytesWritten - start != size) ThrowStale();
             return;
         }
         int total = 1 + SizeOfLength(size) + size;
@@ -155,6 +159,39 @@ public readonly struct GetResponseCodec : IMessageCodec<GetResponse>
         }
     }
 
+    /// <summary>
+    /// The pooled-read variant of <see cref="MergeFrom"/>: the value (field 3) and the key (field 4) are copied into the
+    /// <see cref="ValueLease"/> of the response (rented on first use) instead of a new array and a new string.
+    /// </summary>
+    internal static void MergeFromPooled(ref ProtoReader r, PooledGetResponse m)
+    {
+        while (r.TryReadTag(out uint tag))
+        {
+            switch (tag)
+            {
+                case 8: m.Status = (Status)r.ReadInt32(); break;
+                case 18:
+                {
+                    ProtoVersion? v = m.Version;
+                    if (v is null)
+                    {
+                        v = m.SpareVersion ?? new ProtoVersion();
+                        m.SpareVersion = null;
+                        m.Version = v;
+                    }
+                    long old = r.BeginMessage();
+                    ProtoVersionCodec.MergeFrom(ref r, v);
+                    r.EndMessage(old);
+                    break;
+                }
+                case 26: r.ReadBytesInto(m.RentLease(), isKey: false); break;
+                case 34: r.ReadBytesInto(m.RentLease(), isKey: true); break;
+                case 42: m.SecondaryIndexKey = r.ReadString(); break;
+                default: r.SkipField(tag); break;
+            }
+        }
+    }
+
     public static void Write(GetResponse m, IBufferWriter<byte> output) => MessageCodec.Write<GetResponseCodec, GetResponse>(m, output);
     public static void Parse(ReadOnlySpan<byte> data, GetResponse m) => MessageCodec.Parse<GetResponseCodec, GetResponse>(data, m);
     public static void Parse(in ReadOnlySequence<byte> data, GetResponse m) => MessageCodec.Parse<GetResponseCodec, GetResponse>(in data, m);
@@ -208,9 +245,10 @@ public readonly struct ReadRequestCodec : IMessageCodec<ReadRequest>
     public static void Parse(in ReadOnlySequence<byte> data, ReadRequest m) => MessageCodec.Parse<ReadRequestCodec, ReadRequest>(in data, m);
 }
 
-public readonly struct ReadResponseCodec : IMessageCodec<ReadResponse>
+public readonly struct ReadResponseCodec : IPooledMessageCodec<ReadResponse>
 {
     public static ReadResponse Create() => new();
+    public static ReadResponse Rent() => ReadResponse.Rent();
     public static void Reset(ReadResponse m) => m.Reset();
 
     public static int Size(ReadResponse m)
@@ -255,4 +293,38 @@ public readonly struct ReadResponseCodec : IMessageCodec<ReadResponse>
     public static void Write(ReadResponse m, IBufferWriter<byte> output) => MessageCodec.Write<ReadResponseCodec, ReadResponse>(m, output);
     public static void Parse(ReadOnlySpan<byte> data, ReadResponse m) => MessageCodec.Parse<ReadResponseCodec, ReadResponse>(data, m);
     public static void Parse(in ReadOnlySequence<byte> data, ReadResponse m) => MessageCodec.Parse<ReadResponseCodec, ReadResponse>(in data, m);
+}
+
+/// <summary>
+/// <see cref="ReadResponseCodec"/> for a read that asked for pooled values: each get's value (and key) is copied into a
+/// <see cref="ValueLease"/> owned by the consumer instead of a new array.  Everything else is the classic codec.
+/// </summary>
+public readonly struct ReadResponsePooledCodec : IPooledMessageCodec<ReadResponse>
+{
+    public static ReadResponse Create() => ReadResponseCodec.Create();
+    public static ReadResponse Rent() => ReadResponse.RentPooledValues();
+    public static void Reset(ReadResponse m) => m.Reset();
+    public static int Size(ReadResponse m) => ReadResponseCodec.Size(m);
+    public static void WriteTo(ref ProtoWriter w, ReadResponse m) => ReadResponseCodec.WriteTo(ref w, m);
+
+    public static void MergeFrom(ref ProtoReader r, ReadResponse m)
+    {
+        while (r.TryReadTag(out uint tag))
+        {
+            switch (tag)
+            {
+                case 10:
+                {
+                    // (a spare left by a classic parse is a plain GetResponse: dropped, a pooled one is made)
+                    PooledGetResponse g = m.SpareGets.TryPop() as PooledGetResponse ?? new PooledGetResponse();
+                    long old = r.BeginMessage();
+                    GetResponseCodec.MergeFromPooled(ref r, g);
+                    r.EndMessage(old);
+                    m.Gets.Add(g);
+                    break;
+                }
+                default: r.SkipField(tag); break;
+            }
+        }
+    }
 }

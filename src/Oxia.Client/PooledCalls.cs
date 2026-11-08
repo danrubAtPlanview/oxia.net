@@ -15,7 +15,9 @@
 //   Contract with the batches: after calling `Complete` on a call, the batch must not touch the call again (the awaiter
 //              may already have recycled it).  `Complete` is idempotent (only the first outcome wins), so a call that is
 //              both failed by a shutting-down batcher and answered by the server cannot corrupt the pool.
-//   Divergences: continuations run asynchronously: user code never runs on the batcher loop that completes the calls (a Go goroutine
+//   Divergences: Wave 2 / Z1: MultiShardGet keeps a Clone() of the selected response (the batch response it came from is recycled once its calls
+//              completed); DeleteRangeCompletion is superseded by Pooled/PooledDeleteRange.cs (kept for reference, no longer used).
+//              Wave 2 / Z2: continuations run asynchronously: user code never runs on the batcher loop that completes the calls (a Go goroutine
 //              woken by a channel send is scheduled, not run inline).  The pooled calls are THEMSELVES the thread pool work item
 //              (IThreadPoolWorkItem, CallDispatch): `Complete` stores the result and queues the call, `Execute` sets the result of the
 //              ManualResetValueTaskSourceCore, which runs the awaiter's continuation inline on the pool thread (with the core's own
@@ -435,7 +437,10 @@ internal sealed class MultiShardGet : IValueTaskSource<GetResult>
                 return;
             }
 
-            _selected = AsyncClientImpl.SelectResponse(_comparisonType, _order, _selected, response);
+            var chosen = AsyncClientImpl.SelectResponse(_comparisonType, _order, _selected, response);
+
+            // The response belongs to a batch response that is recycled once its calls completed: keep a copy of the one selected
+            _selected = ReferenceEquals(chosen, response) ? response!.Clone() : chosen;
 
             _counter--;
             if (_counter == 0)

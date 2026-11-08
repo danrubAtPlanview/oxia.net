@@ -29,8 +29,15 @@ internal static class TransportTuning
     /// <summary>EnableMultipleHttp2Connections (the port sets it, like HTTP/2 clients open more connections when MAX_CONCURRENT_STREAMS is reached).</summary>
     internal static bool MultipleHttp2Connections { get; set; } = true;
 
+    /// <summary>Resolve the proxy once per destination (see TransportProxyCache).  Off only to measure the cost it removes.</summary>
+    internal static bool CacheProxyResolution { get; set; } = true;
+
     internal static void Apply(SocketsHttpHandler handler)
     {
+        if (CacheProxyResolution && handler.UseProxy && handler.Proxy is null && HttpClient.DefaultProxy is { } defaultProxy)
+        {
+            handler.Proxy = new TransportProxyCache(defaultProxy);
+        }
         if (Http2StreamWindow is { } window) handler.InitialHttp2StreamWindowSize = window;
         handler.EnableMultipleHttp2Connections = MultipleHttp2Connections;
 

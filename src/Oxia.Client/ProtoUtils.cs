@@ -46,7 +46,9 @@ internal static class ProtoUtils
             return new GetResult("", null, default, err);
         }
 
-        return new GetResult(r.Key ?? originalKey, r.Value, ToVersion(r.Version), null);
+        // A response parsed for the pooled read API holds its value in a lease: a classic caller gets an exact-size array instead
+        byte[]? value = r.Lease is null ? r.Value : r.TakeValueArray();
+        return new GetResult(r.Key ?? originalKey, value, ToVersion(r.Version), null);
     }
 
     public static RecordVersion ToVersion(ProtoVersion? version)

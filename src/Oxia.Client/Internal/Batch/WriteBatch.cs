@@ -17,6 +17,11 @@
 //                index, instead (when one is set).
 //              * Metrics: calls are decorated on Add, the batch is measured when it completes.
 //   Divergences:
+//      * Wave 2 / Z1: the batch is the CONSUMER of the pooled WriteResponse -- it releases it (Release(), a no-op for a response made
+//        with `new`) after the calls took what they need; every per-call Complete is wrapped (SafeComplete): an exception from the
+//        application's code (a Callback, a metrics observer) is logged and does not stop the other calls nor reach the batcher's
+//        catch-all `batch.Fail`, which would complete calls twice (they may be recycled by then); an exception from the rerouter (which owns
+//        the calls once invoked) is logged and dropped for the same reason.  CompleteAsync uses the pooling async method builder.
 //      * `Complete()` is `CompleteAsync()`; the executor's `(response, error)` is a ValueTask<WriteResponse> that throws; the
 //        `prepare func() (*WriteRequest, error)` is a Func<WriteRequest> that throws (errCallsDropped) -- allocated once per
 //        pooled batch, not per attempt.
@@ -38,6 +43,7 @@
 //      * ErrRequestTooLarge is declared in ClientErrors.RequestTooLarge (lead's file); it is not used by the batch itself in
 //        Go either (it is returned by the async client before calling Add).
 // =====================================================================================================================
+using System.Runtime.CompilerServices;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Oxia.Client.Batch;
@@ -154,6 +160,7 @@ internal sealed class WriteBatch : IBatch, IRecyclableBatch
 
     public int Size => _puts.Count + _deletes.Count + _deleteRanges.Count;
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     public async ValueTask CompleteAsync()
     {
         if (Size == 0)
@@ -202,7 +209,19 @@ internal sealed class WriteBatch : IBatch, IRecyclableBatch
                     "Shard was split/merged, re-routing write batch operations shard={Shard} puts={Puts} deletes={Deletes} delete-ranges={DeleteRanges}",
                     _shardId, _puts.Count, _deletes.Count, _deleteRanges.Count);
             }
-            reroute(_shardId, new List<PutCall>(_puts), new List<DeleteCall>(_deletes), new List<DeleteRangeCall>(_deleteRanges));
+            // From here on the rerouter owns the calls (it hands them to other batchers, or fails them): whatever it throws must not
+            // reach the batcher's catch-all, which would fail the calls that were handed off already
+            try
+            {
+                reroute(_shardId, new List<PutCall>(_puts), new List<DeleteCall>(_deletes), new List<DeleteRangeCall>(_deleteRanges));
+            }
+            catch (Exception e)
+            {
+                if (_factory.Log.IsEnabled(LogLevel.Error))
+                {
+                    _factory.Log.LogError(e, "Re-routing the write batch operations failed (shard {Shard})", _shardId);
+                }
+            }
             return;
         }
 
@@ -223,7 +242,16 @@ internal sealed class WriteBatch : IBatch, IRecyclableBatch
         }
         else
         {
-            Handle(response!);
+            try
+            {
+                Handle(response!);
+            }
+            finally
+            {
+                // The calls extracted what they need (results are structs, version strings are immutable): the response graph
+                // goes back to its pool.  A response made with `new` (a fake) ignores Release().
+                response!.Release();
+            }
         }
     }
 
@@ -261,7 +289,7 @@ internal sealed class WriteBatch : IBatch, IRecyclableBatch
             var put = _puts[i];
             if (DropIfCancelled(put.CallContext, out var err))
             {
-                put.Complete(null, err);
+                SafeComplete(put, null, err);
             }
             else
             {
@@ -276,7 +304,7 @@ internal sealed class WriteBatch : IBatch, IRecyclableBatch
             var delete = _deletes[i];
             if (DropIfCancelled(delete.CallContext, out var err))
             {
-                delete.Complete(null, err);
+                SafeComplete(delete, null, err);
             }
             else
             {
@@ -291,7 +319,7 @@ internal sealed class WriteBatch : IBatch, IRecyclableBatch
             var deleteRange = _deleteRanges[i];
             if (DropIfCancelled(deleteRange.CallContext, out var err))
             {
-                deleteRange.Complete(null, err);
+                SafeComplete(deleteRange, null, err);
             }
             else
             {
@@ -322,15 +350,15 @@ internal sealed class WriteBatch : IBatch, IRecyclableBatch
     {
         for (int i = 0; i < _puts.Count; i++)
         {
-            _puts[i].Complete(null, error);
+            SafeComplete(_puts[i], null, error);
         }
         for (int i = 0; i < _deletes.Count; i++)
         {
-            _deletes[i].Complete(null, error);
+            SafeComplete(_deletes[i], null, error);
         }
         for (int i = 0; i < _deleteRanges.Count; i++)
         {
-            _deleteRanges[i].Complete(null, error);
+            SafeComplete(_deleteRanges[i], null, error);
         }
     }
 
@@ -339,20 +367,49 @@ internal sealed class WriteBatch : IBatch, IRecyclableBatch
         var puts = response.Puts;
         for (int i = 0; i < _puts.Count; i++)
         {
-            if (i < puts.Count) _puts[i].Complete(puts[i], null);
-            else _puts[i].Complete(null, MissingResult());
+            if (i < puts.Count) SafeComplete(_puts[i], puts[i], null);
+            else SafeComplete(_puts[i], null, MissingResult());
         }
         var deletes = response.Deletes;
         for (int i = 0; i < _deletes.Count; i++)
         {
-            if (i < deletes.Count) _deletes[i].Complete(deletes[i], null);
-            else _deletes[i].Complete(null, MissingResult());
+            if (i < deletes.Count) SafeComplete(_deletes[i], deletes[i], null);
+            else SafeComplete(_deletes[i], null, MissingResult());
         }
         var deleteRanges = response.DeleteRanges;
         for (int i = 0; i < _deleteRanges.Count; i++)
         {
-            if (i < deleteRanges.Count) _deleteRanges[i].Complete(deleteRanges[i], null);
-            else _deleteRanges[i].Complete(null, MissingResult());
+            if (i < deleteRanges.Count) SafeComplete(_deleteRanges[i], deleteRanges[i], null);
+            else SafeComplete(_deleteRanges[i], null, MissingResult());
+        }
+    }
+
+    // A completion may run code of the application (a Callback, a metrics observer).  One that throws must neither keep the other
+    // calls of the batch from being completed, nor reach the batcher's catch-all, which would fail EVERY call of the batch again -- calls
+    // that were completed already, and by now may be recycled and in use by other operations.  The failure is logged and dropped.
+    private void SafeComplete(PutCall call, PutResponse? response, Exception? error)
+    {
+        try { call.Complete(response, error); }
+        catch (Exception e) { LogCompletionFailure(e); }
+    }
+
+    private void SafeComplete(DeleteCall call, DeleteResponse? response, Exception? error)
+    {
+        try { call.Complete(response, error); }
+        catch (Exception e) { LogCompletionFailure(e); }
+    }
+
+    private void SafeComplete(DeleteRangeCall call, DeleteRangeResponse? response, Exception? error)
+    {
+        try { call.Complete(response, error); }
+        catch (Exception e) { LogCompletionFailure(e); }
+    }
+
+    private void LogCompletionFailure(Exception e)
+    {
+        if (_factory.Log.IsEnabled(LogLevel.Error))
+        {
+            _factory.Log.LogError(e, "A write completion callback threw; the exception was ignored (shard {Shard})", _shardId);
         }
     }
 

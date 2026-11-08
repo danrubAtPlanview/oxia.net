@@ -4,6 +4,8 @@ Component A of the .NET port: the hand-written protobuf codecs of `client.proto`
 `OxiaClient` service, and `OxiaClientRpc` (the typed client over a `CallInvoker`).  Pinned upstream commit
 `8456f61e1ada7b786f5ef17798b45fbc17d0d246`.
 
+**Wave 2 / Z1 update:** the top-level response messages are now rented by the gRPC deserializers and released by their consumers (`Rent()` / `Release()`, pooled value leases for the opt-in pooled read API, a client-identity string cache); see [`../performance-allocation.md`](../performance-allocation.md) and [`Z1-allocation.md`](Z1-allocation.md).
+
 Design in one paragraph: a message is encoded in two passes.  `Size(msg)` walks the message once without allocating and memoises the
 size of every nested message in an `internal int CachedSize` of the message objects; `WriteTo` then writes the fields in ascending
 field-number order, forward, straight into the transport's `IBufferWriter<byte>`.  The hot request messages (`PutRequest`,

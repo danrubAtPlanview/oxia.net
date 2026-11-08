@@ -56,6 +56,56 @@ internal readonly struct KeyOrder
     /// <summary>Allocation-free <see cref="SortKey"/>: writes it into <paramref name="dst"/> (>= SortKeyLength) and returns its length.</summary>
     public int SortKeyTo(string key, Span<byte> dst) => _encoder is null ? Encoding.UTF8.GetBytes(key, dst) : _encoder.EncodeTo(key, dst);
 
+    /// <summary>Allocation-free: the number of bytes of the sort key of a key given as characters.</summary>
+    public int SortKeyLength(ReadOnlySpan<char> key) => _encoder is null ? Encoding.UTF8.GetByteCount(key) : _encoder.EncodedLength(key);
+
+    /// <summary>Allocation-free: writes the sort key of a key given as characters into <paramref name="dst"/> (>= SortKeyLength) and returns its length.</summary>
+    public int SortKeyTo(ReadOnlySpan<char> key, Span<byte> dst) => _encoder is null ? Encoding.UTF8.GetBytes(key, dst) : _encoder.EncodeTo(key, dst);
+
+    /// <summary>
+    /// The order of two keys given as UTF-8 bytes (the pooled range scan merges records it holds as bytes).  Where the sort key of a key
+    /// is its UTF-8 form (the old order and the natural one) the bytes are compared as they are; otherwise the keys are decoded and
+    /// encoded on the stack (or a rented buffer for long keys).  -1, 0 or +1.
+    /// </summary>
+    [SkipLocalsInit]
+    public int CompareUtf8(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b)
+    {
+        if (_encoder is null || ReferenceEquals(_encoder, Encoders.Natural))
+        {
+            return CompareSortKeys(a, b);
+        }
+
+        int charsA = Encoding.UTF8.GetCharCount(a);
+        int charsB = Encoding.UTF8.GetCharCount(b);
+        int total = charsA + charsB;
+        char[]? rentedChars = null;
+        Span<char> chars = total <= 256 ? stackalloc char[256] : (rentedChars = ArrayPool<char>.Shared.Rent(total));
+        try
+        {
+            Encoding.UTF8.GetChars(a, chars);
+            Encoding.UTF8.GetChars(b, chars.Slice(charsA));
+            var keyA = chars.Slice(0, charsA);
+            var keyB = chars.Slice(charsA, charsB);
+            int bytes = SortKeyLength(keyA) + SortKeyLength(keyB);
+            byte[]? rentedBytes = null;
+            Span<byte> sortKeys = bytes <= 512 ? stackalloc byte[512] : (rentedBytes = ArrayPool<byte>.Shared.Rent(bytes));
+            try
+            {
+                int written = SortKeyTo(keyA, sortKeys);
+                int writtenB = SortKeyTo(keyB, sortKeys.Slice(written));
+                return CompareSortKeys(sortKeys.Slice(0, written), sortKeys.Slice(written, writtenB));
+            }
+            finally
+            {
+                if (rentedBytes is not null) ArrayPool<byte>.Shared.Return(rentedBytes);
+            }
+        }
+        finally
+        {
+            if (rentedChars is not null) ArrayPool<char>.Shared.Return(rentedChars);
+        }
+    }
+
     /// <summary>Go: compareSortKeys -- negative, 0 or positive (exactly -1, 0, +1).</summary>
     public int CompareSortKeys(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b) =>
         _encoder is null ? Math.Sign(KeyCompare.CompareWithSlash(a, b)) : Math.Sign(a.SequenceCompareTo(b));

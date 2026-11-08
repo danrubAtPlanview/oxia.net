@@ -232,8 +232,10 @@ public sealed class Metrics : IDisposable
 
         private void OnComplete(GetResponse? response, Exception? err)
         {
+            // Read before the inner call: a pooled-value call takes the lease out of the response
+            int valueLength = response?.ValueLength ?? 0;
             _inner.Complete(response, err);
-            _metrics.RecordOp("get", _start, err, response?.Value?.Length ?? 0);
+            _metrics.RecordOp("get", _start, err, valueLength);
         }
     }
 

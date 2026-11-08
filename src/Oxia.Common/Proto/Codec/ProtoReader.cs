@@ -356,6 +356,40 @@ public ref struct ProtoReader
         }
     }
 
+    /// <summary>
+    /// Like <see cref="ReadString"/> for the repeated low-cardinality strings (client identities): a short ASCII string equal to a
+    /// recently decoded one is returned as that same instance instead of a new allocation.  Never for record keys.
+    /// </summary>
+    public string ReadStringCached()
+    {
+        int len = ReadLength();
+        if (len == 0) return string.Empty;
+        if (_limitInSpan - _pos >= len)
+        {
+            string s = Utf8StringCache.Get(_span.Slice(_pos, len));
+            _pos += len;
+            return s;
+        }
+        return ReadStringSlow(len);
+    }
+
+    /// <summary>Copies the next length-delimited field into the lease (as its value, or its key), without any allocation.</summary>
+    internal void ReadBytesInto(ValueLease lease, bool isKey)
+    {
+        int len = ReadLength();
+        Span<byte> destination = isKey ? lease.ReserveKey(len) : lease.ReserveValue(len);
+        if (len == 0) return;
+        if (_limitInSpan - _pos >= len)
+        {
+            _span.Slice(_pos, len).CopyTo(destination);
+            _pos += len;
+        }
+        else
+        {
+            ReadInto(destination);
+        }
+    }
+
     /// <summary>Length-delimited bytes as an exactly-sized new array (a shared empty array for length 0).</summary>
     public byte[] ReadBytes()
     {
