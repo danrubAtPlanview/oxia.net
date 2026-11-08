@@ -5,7 +5,7 @@
 //   Intent   : Readiness probe for a freshly started `oxia` process: dials GetShardAssignments with the protoc-generated
 //              OxiaClientClient (raw gRPC, NO dependency on the client under test) until the server answers with an
 //              assignment for every expected shard and each shard has a leader address.
-//   Divergences: n/a (new code).
+//   Divergences: n/a (new code; wave 2 added the optional RawSecurity argument: TLS / bearer token for secured servers).
 // =====================================================================================================================
 using Grpc.Core;
 using Grpc.Net.Client;
@@ -17,11 +17,11 @@ public static class OxiaReadiness
 {
     /// <summary>Whether <paramref name="address"/> (host:port) answers GetShardAssignments with <paramref name="expectedShards"/> led shards.</summary>
     public static async Task<(bool Ready, string Detail)> ProbeOnceAsync(string address, uint expectedShards, string @namespace = "default",
-        TimeSpan? callTimeout = null, CancellationToken ct = default)
+        TimeSpan? callTimeout = null, CancellationToken ct = default, RawSecurity? security = null)
     {
         try
         {
-            using var channel = GrpcChannel.ForAddress("http://" + address);
+            using var channel = RawSecurity.CreateChannel(address, security);
             var client = new G.OxiaClient.OxiaClientClient(channel);
             using var call = client.GetShardAssignments(new G.ShardAssignmentsRequest { Namespace = @namespace },
                 deadline: DateTime.UtcNow + (callTimeout ?? TimeSpan.FromSeconds(3)), cancellationToken: ct);
@@ -65,14 +65,14 @@ public static class OxiaReadiness
     /// to the exception.
     /// </summary>
     public static async Task WaitUntilReadyAsync(string address, uint expectedShards, TimeSpan timeout, string @namespace = "default",
-        Func<Task<string?>>? healthCheck = null, Func<Task<string>>? diagnostics = null, CancellationToken ct = default)
+        Func<Task<string?>>? healthCheck = null, Func<Task<string>>? diagnostics = null, CancellationToken ct = default, RawSecurity? security = null)
     {
         var deadline = DateTime.UtcNow + timeout;
         var nextHealthCheck = DateTime.UtcNow + TimeSpan.FromSeconds(1);
         string last = "not probed";
         while (true)
         {
-            var (ready, detail) = await ProbeOnceAsync(address, expectedShards, @namespace, null, ct).ConfigureAwait(false);
+            var (ready, detail) = await ProbeOnceAsync(address, expectedShards, @namespace, null, ct, security).ConfigureAwait(false);
             if (ready) return;
             last = detail;
 

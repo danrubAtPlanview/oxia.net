@@ -5,7 +5,7 @@
 //   Intent   : A few raw gRPC calls through the protoc-generated OxiaClientClient, INDEPENDENT of the client under test.  Used
 //              by the fixture's self tests (e.g. "a new server starts empty": the first put of a fresh shard gets version 0)
 //              and available to any test that needs to look at the server without the library being tested.
-//   Divergences: n/a (new code).  Uses the unary `Write` RPC (deprecated upstream but still served) to avoid a write stream.
+//   Divergences: n/a (new code; wave 2 added the optional RawSecurity argument: TLS / bearer token for secured servers).  Uses the unary `Write` RPC (deprecated upstream but still served) to avoid a write stream.
 // =====================================================================================================================
 using Grpc.Net.Client;
 using G = Io.Oxia.Proto.V1;
@@ -14,16 +14,16 @@ namespace Oxia.TestSupport;
 
 public static class RawOxia
 {
-    private static G.OxiaClient.OxiaClientClient Connect(string address, out GrpcChannel channel)
+    private static G.OxiaClient.OxiaClientClient Connect(string address, out GrpcChannel channel, RawSecurity? security = null)
     {
-        channel = GrpcChannel.ForAddress("http://" + address);
+        channel = RawSecurity.CreateChannel(address, security);
         return new G.OxiaClient.OxiaClientClient(channel);
     }
 
     /// <summary>Puts a record on the given shard; returns the version id the server assigned.</summary>
-    public static async Task<long> PutAsync(string address, long shard, string key, byte[] value, CancellationToken ct = default)
+    public static async Task<long> PutAsync(string address, long shard, string key, byte[] value, CancellationToken ct = default, RawSecurity? security = null)
     {
-        var client = Connect(address, out var channel);
+        var client = Connect(address, out var channel, security);
         using (channel)
         {
             var request = new G.WriteRequest { Shard = shard };
@@ -36,9 +36,9 @@ public static class RawOxia
     }
 
     /// <summary>Reads a record from the given shard; null when it does not exist.</summary>
-    public static async Task<byte[]?> GetAsync(string address, long shard, string key, CancellationToken ct = default)
+    public static async Task<byte[]?> GetAsync(string address, long shard, string key, CancellationToken ct = default, RawSecurity? security = null)
     {
-        var client = Connect(address, out var channel);
+        var client = Connect(address, out var channel, security);
         using (channel)
         {
             var request = new G.ReadRequest { Shard = shard };
@@ -52,9 +52,9 @@ public static class RawOxia
 
     /// <summary>The (shard id, leader address) pairs and key sorting the server announces for the default namespace.</summary>
     public static async Task<(IReadOnlyList<(long Shard, string Leader)> Shards, G.KeySorting KeySorting)> GetAssignmentsAsync(
-        string address, string @namespace = "default", CancellationToken ct = default)
+        string address, string @namespace = "default", CancellationToken ct = default, RawSecurity? security = null)
     {
-        var client = Connect(address, out var channel);
+        var client = Connect(address, out var channel, security);
         using (channel)
         {
             using var call = client.GetShardAssignments(new G.ShardAssignmentsRequest { Namespace = @namespace }, cancellationToken: ct);
