@@ -214,7 +214,25 @@ internal sealed class ClientOptions
         if (errs is null || errs.Count == 0) return null;
         if (errs.Count == 1) return errs[0];
 
-        var message = string.Join("; ", errs.Select(static e => e.Message));
-        return new AggregateException(message, errs);
+        return new MultiError(errs);
     }
+}
+
+/// <summary>go.uber.org/multierr's combined error: an AggregateException whose message joins the members with "; ".</summary>
+internal sealed class MultiError : AggregateException
+{
+    private readonly string _message;
+
+    public MultiError(IReadOnlyList<Exception> errors) : base(errors)
+    {
+        var messages = new string[errors.Count];
+        for (int i = 0; i < messages.Length; i++)
+        {
+            messages[i] = errors[i].Message;
+        }
+
+        _message = string.Join("; ", messages);
+    }
+
+    public override string Message => _message;
 }

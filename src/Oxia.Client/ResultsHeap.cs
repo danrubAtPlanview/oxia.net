@@ -105,6 +105,14 @@ internal sealed class ResultHeap
         Results = new ResultAndChannel[Math.Max(capacity, 1)];
     }
 
+    /// <summary>Go: <c>h := &amp;ResultHeap{results: elements}; heap.Init(h)</c> -- a heap built from existing elements.</summary>
+    public ResultHeap(KeyOrder order, ReadOnlySpan<ResultAndChannel> elements) : this(order, elements.Length)
+    {
+        elements.CopyTo(Results);
+        _count = elements.Length;
+        Init();
+    }
+
     /// <summary>Go: h.results -- the backing array; only the first <see cref="Count"/> elements are valid and Results[0] is the min.</summary>
     public ResultAndChannel[] Results { get; private set; }
 
