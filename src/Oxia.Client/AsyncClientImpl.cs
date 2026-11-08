@@ -499,6 +499,10 @@ internal sealed class AsyncClientImpl : IAsyncClient
 
     public ValueTask<Exception?> DeleteRangeAsync(string minKeyInclusive, string maxKeyExclusive, params ReadOnlySpan<DeleteRangeOption> options)
     {
+        // A Go string cannot be nil; a null bound would otherwise be queued and throw inside the batcher loop, leaving the call
+        // forever incomplete (review R3-3).
+        ArgumentNullException.ThrowIfNull(minKeyInclusive);
+        ArgumentNullException.ThrowIfNull(maxKeyExclusive);
         var keyErr = ValidateKey(minKeyInclusive) ?? ValidateKey(maxKeyExclusive);
         if (keyErr is not null) return new ValueTask<Exception?>(keyErr);
 
