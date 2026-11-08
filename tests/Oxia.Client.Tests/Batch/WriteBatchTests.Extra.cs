@@ -55,7 +55,7 @@ public class WriteBatchExtraTests
 {
     private static readonly TimeSpan TenSeconds = TimeSpan.FromSeconds(10);
 
-    private static Internal.Batch.BatcherFactory NewFactory(IExecutor executor, int maxRequests = 100, TimeSpan? linger = null,
+    private static Oxia.Client.Internal.Batch.BatcherFactory NewFactory(IExecutor executor, int maxRequests = 100, TimeSpan? linger = null,
         OxiaMetrics? metrics = null) =>
         new(executor, "default", linger ?? TimeSpan.Zero, maxRequests, metrics ?? new OxiaMetrics(null), TimeSpan.FromSeconds(30));
 

@@ -70,13 +70,13 @@ public class ReusableTimeoutExtraTests
             RequestTimeout = TimeSpan.Zero,
         };
         var batch = factory.NewBatch(1);
-        batch.Add(new Internal.Model.GetCall { Key = "a", Callback = (_, _) => { } });
+        batch.Add(new Oxia.Client.Internal.Model.GetCall { Key = "a", Callback = (_, _) => { } });
         await batch.CompleteAsync();
         Assert.True(tokens[0].IsCancellationRequested);
 
         factory.RequestTimeout = TimeSpan.FromSeconds(30);
         batch = factory.NewBatch(1);
-        batch.Add(new Internal.Model.GetCall { Key = "a", Callback = (_, _) => { } });
+        batch.Add(new Oxia.Client.Internal.Model.GetCall { Key = "a", Callback = (_, _) => { } });
         await batch.CompleteAsync();
         Assert.False(tokens[1].CanBeCanceled && tokens[1].IsCancellationRequested);
     }
@@ -97,12 +97,12 @@ public class ReusableTimeoutExtraTests
         };
         var batch = factory.NewBatch(1);
         Exception? error = null;
-        batch.Add(new Internal.Model.PutCall { Key = "a", Callback = (_, e) => error = e });
+        batch.Add(new Oxia.Client.Internal.Model.PutCall { Key = "a", Callback = (_, e) => error = e });
 
         await batch.CompleteAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.IsAssignableFrom<OperationCanceledException>(error is { InnerException: { } inner } && inner is OperationCanceledException ? inner : error);
         // the executor never called prepare: the request was not sent
-        Assert.True(Internal.Model.CallContext.IsNotSent(error));
+        Assert.True(Oxia.Client.Internal.Model.CallContext.IsNotSent(error));
     }
 }
