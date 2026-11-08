@@ -36,6 +36,14 @@ public readonly struct SecondaryIndexCodec : IMessageCodec<SecondaryIndex>
         if (!string.IsNullOrEmpty(m.SecondaryKey)) w.WriteString(18, m.SecondaryKey);
     }
 
+    /// <summary>Straight-line body writer into a reserved block; returns the new position.</summary>
+    internal static int WriteBlock(Span<byte> d, int p, SecondaryIndex m)
+    {
+        if (!string.IsNullOrEmpty(m.IndexName)) p = RawWriter.String(d, p, 10, m.IndexName);
+        if (!string.IsNullOrEmpty(m.SecondaryKey)) p = RawWriter.String(d, p, 18, m.SecondaryKey);
+        return p;
+    }
+
     public static void MergeFrom(ref ProtoReader r, SecondaryIndex m)
     {
         while (r.TryReadTag(out uint tag))
@@ -139,6 +147,69 @@ public readonly struct PutRequestCodec : IMessageCodec<PutRequest>
     }
 
     public static void WriteTo(ref ProtoWriter w, PutRequest m)
+    {
+        int size = m.CachedSize;
+        if (size > ProtoWriter.BlockLimit)
+        {
+            WriteChunked(ref w, m);
+            return;
+        }
+        Span<byte> d = w.Reserve(size);
+        if (WriteBlock(d, 0, m) != size) ThrowStale();
+        w.Advance(size);
+    }
+
+    /// <summary>tag + length + body, as the element of a repeated message field (the WriteRequest loop).</summary>
+    internal static void WriteNested(ref ProtoWriter w, byte tag, PutRequest m)
+    {
+        int size = m.CachedSize;
+        if (size > ProtoWriter.BlockLimit)
+        {
+            w.WriteTagLength(tag, size);
+            WriteChunked(ref w, m);
+            return;
+        }
+        int total = 1 + SizeOfLength(size) + size;
+        Span<byte> d = w.Reserve(total);
+        int p = RawWriter.TagVarint(d, 0, tag, (uint)size);
+        if (WriteBlock(d, p, m) != total) ThrowStale();
+        w.Advance(total);
+    }
+
+    /// <summary>Straight-line body writer into a reserved block; returns the new position.</summary>
+    internal static int WriteBlock(Span<byte> d, int p, PutRequest m)
+    {
+        string key = m.Key;
+        if (!string.IsNullOrEmpty(key)) p = RawWriter.String(d, p, 10, key);
+        ReadOnlyMemory<byte> value = m.Value;
+        if (!value.IsEmpty) p = RawWriter.Bytes(d, p, 18, value.Span);
+        if (m.ExpectedVersionId is { } ev) p = RawWriter.TagVarint(d, p, 24, (ulong)ev);
+        if (m.SessionId is { } sid) p = RawWriter.TagVarint(d, p, 32, (ulong)sid);
+        if (m.ClientIdentity is { } ci) p = RawWriter.String(d, p, 42, ci);
+        if (m.PartitionKey is { } pk) p = RawWriter.String(d, p, 50, pk);
+        if (m.SequenceKeyDelta is { Length: > 0 } deltas)
+        {
+            int l = 0;
+            foreach (ulong x in deltas) l += SizeOfVarint(x);
+            p = RawWriter.TagVarint(d, p, 58, (uint)l);
+            foreach (ulong x in deltas) p = RawWriter.Varint(d, p, x);
+        }
+        if (m.SecondaryIndexes is { Count: > 0 } indexes)
+        {
+            foreach (SecondaryIndex si in CollectionsMarshal.AsSpan(indexes))
+            {
+                p = RawWriter.TagVarint(d, p, 66, (uint)si.CachedSize);
+                p = SecondaryIndexCodec.WriteBlock(d, p, si);
+            }
+        }
+        if (m.OverrideVersionId is { } ov) p = RawWriter.TagVarint(d, p, 72, (ulong)ov);
+        if (m.OverrideModificationsCount is { } oc) p = RawWriter.TagVarint(d, p, 80, (ulong)oc);
+        if (m.OpIndex != 0) p = RawWriter.TagVarint(d, p, 88, m.OpIndex);
+        return p;
+    }
+
+    /// <summary>Field-by-field writer through the ProtoWriter (any size, output split in segments).</summary>
+    internal static void WriteChunked(ref ProtoWriter w, PutRequest m)
     {
         string key = m.Key;
         if (!string.IsNullOrEmpty(key)) w.WriteString(10, key);
@@ -292,6 +363,44 @@ public readonly struct DeleteRequestCodec : IMessageCodec<DeleteRequest>
 
     public static void WriteTo(ref ProtoWriter w, DeleteRequest m)
     {
+        int size = m.CachedSize;
+        if (size > ProtoWriter.BlockLimit)
+        {
+            WriteChunked(ref w, m);
+            return;
+        }
+        Span<byte> d = w.Reserve(size);
+        if (WriteBlock(d, 0, m) != size) ThrowStale();
+        w.Advance(size);
+    }
+
+    internal static void WriteNested(ref ProtoWriter w, byte tag, DeleteRequest m)
+    {
+        int size = m.CachedSize;
+        if (size > ProtoWriter.BlockLimit)
+        {
+            w.WriteTagLength(tag, size);
+            WriteChunked(ref w, m);
+            return;
+        }
+        int total = 1 + SizeOfLength(size) + size;
+        Span<byte> d = w.Reserve(total);
+        int p = RawWriter.TagVarint(d, 0, tag, (uint)size);
+        if (WriteBlock(d, p, m) != total) ThrowStale();
+        w.Advance(total);
+    }
+
+    internal static int WriteBlock(Span<byte> d, int p, DeleteRequest m)
+    {
+        if (!string.IsNullOrEmpty(m.Key)) p = RawWriter.String(d, p, 10, m.Key);
+        if (m.ExpectedVersionId is { } ev) p = RawWriter.TagVarint(d, p, 16, (ulong)ev);
+        if (m.PartitionKey is { } pk) p = RawWriter.String(d, p, 26, pk);
+        if (m.OpIndex != 0) p = RawWriter.TagVarint(d, p, 32, m.OpIndex);
+        return p;
+    }
+
+    internal static void WriteChunked(ref ProtoWriter w, DeleteRequest m)
+    {
         if (!string.IsNullOrEmpty(m.Key)) w.WriteString(10, m.Key);
         if (m.ExpectedVersionId is { } ev) w.WriteTagVarint(16, (ulong)ev);
         if (m.PartitionKey is { } pk) w.WriteString(26, pk);
@@ -368,6 +477,43 @@ public readonly struct DeleteRangeRequestCodec : IMessageCodec<DeleteRangeReques
     }
 
     public static void WriteTo(ref ProtoWriter w, DeleteRangeRequest m)
+    {
+        int size = m.CachedSize;
+        if (size > ProtoWriter.BlockLimit)
+        {
+            WriteChunked(ref w, m);
+            return;
+        }
+        Span<byte> d = w.Reserve(size);
+        if (WriteBlock(d, 0, m) != size) ThrowStale();
+        w.Advance(size);
+    }
+
+    internal static void WriteNested(ref ProtoWriter w, byte tag, DeleteRangeRequest m)
+    {
+        int size = m.CachedSize;
+        if (size > ProtoWriter.BlockLimit)
+        {
+            w.WriteTagLength(tag, size);
+            WriteChunked(ref w, m);
+            return;
+        }
+        int total = 1 + SizeOfLength(size) + size;
+        Span<byte> d = w.Reserve(total);
+        int p = RawWriter.TagVarint(d, 0, tag, (uint)size);
+        if (WriteBlock(d, p, m) != total) ThrowStale();
+        w.Advance(total);
+    }
+
+    internal static int WriteBlock(Span<byte> d, int p, DeleteRangeRequest m)
+    {
+        if (!string.IsNullOrEmpty(m.StartInclusive)) p = RawWriter.String(d, p, 10, m.StartInclusive);
+        if (!string.IsNullOrEmpty(m.EndExclusive)) p = RawWriter.String(d, p, 18, m.EndExclusive);
+        if (m.OpIndex != 0) p = RawWriter.TagVarint(d, p, 24, m.OpIndex);
+        return p;
+    }
+
+    internal static void WriteChunked(ref ProtoWriter w, DeleteRangeRequest m)
     {
         if (!string.IsNullOrEmpty(m.StartInclusive)) w.WriteString(10, m.StartInclusive);
         if (!string.IsNullOrEmpty(m.EndExclusive)) w.WriteString(18, m.EndExclusive);
@@ -448,21 +594,9 @@ public readonly struct WriteRequestCodec : IMessageCodec<WriteRequest>
     public static void WriteTo(ref ProtoWriter w, WriteRequest m)
     {
         if (m.Shard is { } shard) w.WriteTagVarint(8, (ulong)shard);
-        foreach (PutRequest p in CollectionsMarshal.AsSpan(m.Puts))
-        {
-            w.WriteTagLength(18, p.CachedSize);
-            PutRequestCodec.WriteTo(ref w, p);
-        }
-        foreach (DeleteRequest d in CollectionsMarshal.AsSpan(m.Deletes))
-        {
-            w.WriteTagLength(26, d.CachedSize);
-            DeleteRequestCodec.WriteTo(ref w, d);
-        }
-        foreach (DeleteRangeRequest d in CollectionsMarshal.AsSpan(m.DeleteRanges))
-        {
-            w.WriteTagLength(34, d.CachedSize);
-            DeleteRangeRequestCodec.WriteTo(ref w, d);
-        }
+        foreach (PutRequest p in CollectionsMarshal.AsSpan(m.Puts)) PutRequestCodec.WriteNested(ref w, 18, p);
+        foreach (DeleteRequest d in CollectionsMarshal.AsSpan(m.Deletes)) DeleteRequestCodec.WriteNested(ref w, 26, d);
+        foreach (DeleteRangeRequest d in CollectionsMarshal.AsSpan(m.DeleteRanges)) DeleteRangeRequestCodec.WriteNested(ref w, 34, d);
     }
 
     public static void MergeFrom(ref ProtoReader r, WriteRequest m)

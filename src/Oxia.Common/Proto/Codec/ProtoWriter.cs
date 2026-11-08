@@ -45,11 +45,16 @@ public static class ProtoWire
 
     /// <summary>Size of a string field (one-byte tag, length, UTF-8 payload).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int SizeOfString(string value) => SizeOfLengthDelimited(Encoding.UTF8.GetByteCount(value));
+    public static int SizeOfString(string value) => SizeOfLengthDelimited(Utf8Fast.GetByteCount(value));
 
     /// <summary>Size of a nested-message field whose body is <paramref name="bodySize"/> bytes.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int SizeOfMessage(int bodySize) => SizeOfLengthDelimited(bodySize);
+
+    /// <summary>The message no longer has the size that <c>Size()</c> memoised: it was modified between Size() and WriteTo().</summary>
+    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
+    internal static void ThrowStale()
+        => throw new InvalidOperationException("The message was modified between Size() and WriteTo(); its memoised size is stale.");
 }
 
 /// <summary>
@@ -104,6 +109,24 @@ public ref struct ProtoWriter
             _span = default;
         }
     }
+
+    /// <summary>Largest message body that the hot codecs write through one <see cref="Reserve"/>d contiguous block.</summary>
+    public const int BlockLimit = 16 * 1024;
+
+    /// <summary>
+    /// Returns a span of exactly <paramref name="count"/> contiguous bytes at the current position.  The caller writes into it
+    /// and then calls <see cref="Advance"/> with the number of bytes it wrote (nothing is written to the output before that).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public Span<byte> Reserve(int count)
+    {
+        Ensure(count);
+        return _span.Slice(_pos, count);
+    }
+
+    /// <summary>Commits <paramref name="count"/> bytes written into the span returned by <see cref="Reserve"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Advance(int count) => _pos += count;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void Ensure(int count)
@@ -260,7 +283,7 @@ public ref struct ProtoWriter
             if (_span.Length - _pos >= 1 + lenBytes + chars * 3)
             {
                 Span<byte> dst = _span.Slice(_pos);
-                int n = Encoding.UTF8.GetBytes(value, dst.Slice(1 + lenBytes));
+                int n = Utf8Fast.GetBytes(value, dst.Slice(1 + lenBytes));
                 dst[0] = tag;
                 if (lenBytes == 1)
                 {
@@ -288,11 +311,11 @@ public ref struct ProtoWriter
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void WriteStringExact(byte tag, string value)
     {
-        int n = Encoding.UTF8.GetByteCount(value);
+        int n = Utf8Fast.GetByteCount(value);
         WriteTagLength(tag, n);
         if (n == 0) return;
         Ensure(n);
-        Encoding.UTF8.GetBytes(value, _span.Slice(_pos));
+        Utf8Fast.GetBytes(value, _span.Slice(_pos));
         _pos += n;
     }
 

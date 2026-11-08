@@ -32,6 +32,44 @@ public readonly struct GetRequestCodec : IMessageCodec<GetRequest>
 
     public static void WriteTo(ref ProtoWriter w, GetRequest m)
     {
+        int size = m.CachedSize;
+        if (size > ProtoWriter.BlockLimit)
+        {
+            WriteChunked(ref w, m);
+            return;
+        }
+        Span<byte> d = w.Reserve(size);
+        if (WriteBlock(d, 0, m) != size) ThrowStale();
+        w.Advance(size);
+    }
+
+    internal static void WriteNested(ref ProtoWriter w, byte tag, GetRequest m)
+    {
+        int size = m.CachedSize;
+        if (size > ProtoWriter.BlockLimit)
+        {
+            w.WriteTagLength(tag, size);
+            WriteChunked(ref w, m);
+            return;
+        }
+        int total = 1 + SizeOfLength(size) + size;
+        Span<byte> d = w.Reserve(total);
+        int p = RawWriter.TagVarint(d, 0, tag, (uint)size);
+        if (WriteBlock(d, p, m) != total) ThrowStale();
+        w.Advance(total);
+    }
+
+    internal static int WriteBlock(Span<byte> d, int p, GetRequest m)
+    {
+        if (!string.IsNullOrEmpty(m.Key)) p = RawWriter.String(d, p, 10, m.Key);
+        if (m.IncludeValue) p = RawWriter.TagVarint(d, p, 16, 1);
+        if (m.ComparisonType != 0) p = RawWriter.TagVarint(d, p, 24, (ulong)(long)(int)m.ComparisonType);
+        if (m.SecondaryIndexName is { } sn) p = RawWriter.String(d, p, 34, sn);
+        return p;
+    }
+
+    internal static void WriteChunked(ref ProtoWriter w, GetRequest m)
+    {
         if (!string.IsNullOrEmpty(m.Key)) w.WriteString(10, m.Key);
         if (m.IncludeValue) w.WriteTagVarint(16, 1);
         if (m.ComparisonType != 0) w.WriteTagVarint(24, (ulong)(long)(int)m.ComparisonType);
@@ -141,11 +179,7 @@ public readonly struct ReadRequestCodec : IMessageCodec<ReadRequest>
     public static void WriteTo(ref ProtoWriter w, ReadRequest m)
     {
         if (m.Shard is { } shard) w.WriteTagVarint(8, (ulong)shard);
-        foreach (GetRequest g in CollectionsMarshal.AsSpan(m.Gets))
-        {
-            w.WriteTagLength(18, g.CachedSize);
-            GetRequestCodec.WriteTo(ref w, g);
-        }
+        foreach (GetRequest g in CollectionsMarshal.AsSpan(m.Gets)) GetRequestCodec.WriteNested(ref w, 18, g);
     }
 
     public static void MergeFrom(ref ProtoReader r, ReadRequest m)

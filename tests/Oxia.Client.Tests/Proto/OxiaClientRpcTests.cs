@@ -315,9 +315,15 @@ public class OxiaClientRpcTests : IClassFixture<OxiaClientRpcFixture>
         Assert.True(metadata!.TryGetLeaderHint(out long shard, out string leader));
         Assert.Equal(3L, shard);
         Assert.Equal("leader.example:6648", leader);
-        // ... and the gRPC status code
+        // ... and the gRPC status code of the original failure
         Assert.NotEqual(StatusCode.OK, OxiaErrors.GrpcCode(thrown));
-        Assert.IsType<RpcException>(thrown.InnerException);
+        Assert.Equal(MockOxiaState.NotLeader().StatusCode, OxiaErrors.GrpcCode(thrown));
+        var translatedException = Assert.IsType<TranslatedGrpcException>(thrown);
+        Assert.Same(OxiaErrors.NodeIsNotLeader, translatedException.Sentinel);
+        Assert.IsType<RpcException>(translatedException.InnerException);
+        Assert.Same(translatedException.InnerException, translatedException.GrpcException);
+        Assert.Same(translatedException.InnerException, translatedException.Original);
+        Assert.True(translatedException.GrpcException!.Trailers.Count > 0, "the original trailers (grpc-status-details-bin) must still be there");
     }
 
     [Fact]

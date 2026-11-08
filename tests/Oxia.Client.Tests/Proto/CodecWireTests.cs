@@ -449,6 +449,59 @@ public class CodecWireTests
     }
 
     [Fact]
+    public void MessagesAroundTheBlockWriterLimit_TakeBothPathsAndMatchGoogleProtobuf()
+    {
+        // the hot request codecs write a message of up to BlockLimit bytes through one reserved block and larger ones through the
+        // chunked field-by-field writer; the bytes must be the same on both sides of the limit
+        const int limit = ProtoWriter.BlockLimit;
+        for (int s = limit - 40; s <= limit + 40; s++)
+        {
+            string key = new string('k', s - 5) + "é€";                   // multi-byte tail
+            byte[] value = new byte[s - 12];
+
+            var req = new WriteRequest { Shard = 3 };
+            req.Puts.Add(new PutRequest { Key = "k", Value = value, OpIndex = 1, ExpectedVersionId = 2 });
+            req.Puts.Add(new PutRequest { Key = key, ClientIdentity = "c", OpIndex = 2 });
+            req.Deletes.Add(new DeleteRequest { Key = key, PartitionKey = "p", OpIndex = 3 });
+            req.DeleteRanges.Add(new DeleteRangeRequest { StartInclusive = key, EndExclusive = "z", OpIndex = 4 });
+            var read = new ReadRequest { Shard = 3 };
+            read.Gets.Add(new GetRequest { Key = key, IncludeValue = true });
+
+            var oracle = new G.WriteRequest { Shard = 3 };
+            oracle.Puts.Add(new G.PutRequest { Key = "k", Value = ByteString.CopyFrom(value), OpIndex = 1, ExpectedVersionId = 2 });
+            oracle.Puts.Add(new G.PutRequest { Key = key, ClientIdentity = "c", OpIndex = 2 });
+            oracle.Deletes.Add(new G.DeleteRequest { Key = key, PartitionKey = "p", OpIndex = 3 });
+            oracle.DeleteRanges.Add(new G.DeleteRangeRequest { StartInclusive = key, EndExclusive = "z", OpIndex = 4 });
+            var readOracle = new G.ReadRequest { Shard = 3 };
+            readOracle.Gets.Add(new G.GetRequest { Key = key, IncludeValue = true });
+
+            Assert.True(oracle.ToByteArray().AsSpan().SequenceEqual(Encode<WriteRequestCodec, WriteRequest>(req)), $"WriteRequest, s = {s}");
+            Assert.True(readOracle.ToByteArray().AsSpan().SequenceEqual(Encode<ReadRequestCodec, ReadRequest>(read)), $"ReadRequest, s = {s}");
+
+            // standalone use of the element codecs (WriteTo without the length prefix of the parent)
+            var delete = req.Deletes[0];
+            Assert.True(oracle.Deletes[0].ToByteArray().AsSpan().SequenceEqual(Encode<DeleteRequestCodec, DeleteRequest>(delete)), $"DeleteRequest, s = {s}");
+            var chunked = new ChunkedBufferWriter(32 * 1024);
+            WriteRequestCodec.Write(req, chunked);
+            Assert.True(oracle.ToByteArray().AsSpan().SequenceEqual(chunked.ToArray()), $"WriteRequest chunked, s = {s}");
+        }
+    }
+
+    [Fact]
+    public void ModifyingAMessageBetweenSizeAndWrite_ThrowsInsteadOfCorruptingTheOutput()
+    {
+        var put = new PutRequest { Key = "short", Value = new byte[10] };
+        int size = PutRequestCodec.Size(put);
+        put.Key = "a-key-that-is-much-longer-than-the-size-memoised-above";
+        var buffer = new byte[size + 1000];
+        Assert.ThrowsAny<Exception>(() =>
+        {
+            var w = new ProtoWriter(buffer);
+            PutRequestCodec.WriteTo(ref w, put);
+        });
+    }
+
+    [Fact]
     public void ManyElements_RepeatedFields()
     {
         var resp = new WriteResponse();
@@ -467,6 +520,37 @@ public class CodecWireTests
         Assert.Equal(20_000, parsed.Puts.Count);
         Assert.Equal(19_999L, parsed.Puts[19_999].Version!.VersionId);
         Assert.Equal((ulong)12_345, parsed.Puts[12_345].Version!.CreatedTimestamp);
+    }
+
+    // ---- ownership (analogue of Go TestVtprotoCodec_UnmarshalOwnsTheBytes) -------------------------------------------
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ParsedMessagesOwnTheirBytes_TheTransportBufferCanBeRecycled(bool segmented)
+    {
+        var resp = new ReadResponse();
+        resp.Gets.Add(new GetResponse { Status = Status.Ok, Key = "the-found-key", SecondaryIndexKey = "sec", Value = Enumerable.Repeat((byte)'x', 64 * 1024).ToArray(), Version = new ProtoVersion { ClientIdentity = "client-id" } });
+        byte[] wire = Encode<ReadResponseCodec, ReadResponse>(resp);
+        byte[] source = (byte[])wire.Clone();
+
+        var parsed = new ReadResponse();
+        if (segmented)
+        {
+            var seq = Segments.Chunks(source, 1000);
+            ReadResponseCodec.Parse(in seq, parsed);
+        }
+        else
+        {
+            ReadResponseCodec.Parse(source, parsed);
+        }
+        Array.Fill(source, (byte)0xFF);   // what the next message received into a pooled transport buffer would do
+
+        GetResponse g = parsed.Gets.Single();
+        Assert.Equal("the-found-key", g.Key);
+        Assert.Equal("sec", g.SecondaryIndexKey);
+        Assert.Equal("client-id", g.Version!.ClientIdentity);
+        Assert.True(g.Value!.All(b => b == (byte)'x'));
     }
 
     // ---- writer behaviour --------------------------------------------------------------------------------------------

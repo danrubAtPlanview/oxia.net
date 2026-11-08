@@ -44,6 +44,22 @@ public sealed class TranslatedGrpcException : OxiaException, IErrorIs
     /// <summary>The Oxia sentinel (e.g. <see cref="OxiaErrors.NodeIsNotLeader"/>) this failure maps to.</summary>
     public Exception Sentinel { get; }
 
+    /// <summary>The failure as gRPC reported it (the exception that was translated); carries the status trailers.</summary>
+    public Exception Original => InnerException!;
+
+    /// <summary>The <see cref="RpcException"/> inside <see cref="Original"/> (the exception itself or the first one in its chain), if any.</summary>
+    public RpcException? GrpcException
+    {
+        get
+        {
+            for (Exception? e = InnerException; e is not null; e = e.InnerException)
+            {
+                if (e is RpcException rpc) return rpc;
+            }
+            return null;
+        }
+    }
+
     bool IErrorIs.Is(Exception target) => OxiaErrors.Is(Sentinel, target);
 }
 
