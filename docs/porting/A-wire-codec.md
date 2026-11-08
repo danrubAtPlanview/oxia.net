@@ -1,0 +1,79 @@
+# A — wire codec
+
+Component A of the .NET port: the hand-written protobuf codecs of `client.proto`, the gRPC method descriptors / marshallers of the
+`OxiaClient` service, and `OxiaClientRpc` (the typed client over a `CallInvoker`).  Pinned upstream commit
+`8456f61e1ada7b786f5ef17798b45fbc17d0d246`.
+
+Design in one paragraph: a message is encoded in two passes.  `Size(msg)` walks the message once without allocating and memoises the
+size of every nested message in an `internal int CachedSize` of the message objects; `WriteTo` then writes the fields in ascending
+field-number order, forward, straight into the transport's `IBufferWriter<byte>`.  The hot request messages (`PutRequest`,
+`DeleteRequest`, `DeleteRangeRequest`, `GetRequest`) are written through one reserved contiguous block with a local position
+(`ProtoWriter.Reserve` + `RawWriter`) when their body is at most 16 KiB, and field by field through the `ProtoWriter` (chunked
+output, any size) otherwise.  Decoding is a hand-rolled `ProtoReader` over a span or a (multi-segment) `ReadOnlySequence<byte>` that
+parses INTO an existing instance; response-side messages recycle their children (`Spares<T>`) when `Reset()`, so re-parsing into a
+reused instance allocates nothing apart from strings and byte arrays.
+
+## Files
+
+### `common/proto/client_vtproto.pb.go`, `client.proto`, `marshal.go` (wire format and message codecs)
+
+| Upstream file | C# file | Status | Notes (divergences, extra tests) |
+|---|---|---|---|
+| `client_vtproto.pb.go` (SizeVT / MarshalToSizedBufferVT / UnmarshalVT: primitives) | `src/Oxia.Common/Proto/Codec/ProtoWriter.cs` (`ProtoWire`, `ProtoWriter`), `Codec/RawWriter.cs` (`Utf8Fast`, `RawWriter`), `Codec/ProtoReader.cs` (`ProtoReader`, `ProtoParseException`) | ported | vtproto marshals backwards into one pre-sized slice; here forward into an `IBufferWriter<byte>` using memoised nested sizes. Strings are transcoded UTF-16 -> UTF-8 straight into the destination (ASCII fast path with vector narrowing, length prefix back-filled). Reader walks `ReadOnlySequence` segments itself; truncated / garbled input throws `ProtoParseException : FormatException`; unknown fields (incl. groups) skipped; known field number with a different wire type skipped as unknown. |
+| `client_vtproto.pb.go` ShardAssignmentsRequest, ShardAssignments, NamespaceShardsAssignment, ShardAssignment, Int32HashRange | `Codec/ShardAssignmentCodecs.cs` | ported | Map entries always carry key and value (vtproto does; Google.Protobuf C# omits an empty key — both parse the same). Cold path: not recycled on `Reset()`. |
+| `client_vtproto.pb.go` WriteRequest, PutRequest, DeleteRequest, DeleteRangeRequest, SecondaryIndex, WriteResponse, PutResponse, DeleteResponse, DeleteRangeResponse, Version | `Codec/WriteCodecs.cs` (`Version` is `ProtoVersionCodec` / `ProtoVersion`) | ported | Hot path. `optional` fields emitted whenever non-null (even when equal to the default / empty string); `sequence_key_delta` packed (unpacked elements accepted on parse). Request lists are never recycled (they may hold batcher subclasses of the message). |
+| `client_vtproto.pb.go` ReadRequest, ReadResponse, GetRequest, GetResponse | `Codec/ReadCodecs.cs` | ported | `GetResponse.Value` is `optional bytes`: null = absent, empty array = present with length 0; parsed into one exact-size `byte[]` (shared empty array for length 0). |
+| `client_vtproto.pb.go` ListRequest/Response, RangeScanRequest/Response | `Codec/ScanCodecs.cs` | ported | `RangeScanRequest.include_values` is `optional bool` -> `bool?`. |
+| `client_vtproto.pb.go` GetSequenceUpdatesRequest/Response, CreateSessionRequest/Response, SessionHeartbeat, KeepAliveResponse, CloseSessionRequest/Response | `Codec/SessionCodecs.cs` | ported | |
+| `client_vtproto.pb.go` NotificationsRequest, Notification, NotificationEntry, NotificationBatch | `Codec/NotificationCodecs.cs` | ported | `NotificationEntry.key` is `optional` (empty key still emitted). |
+| `marshal.go` (`MarshalToBuffer`: size, then marshal into a reusable buffer) | `Codec/MessageCodec.cs` (`IMessageCodec<T>`, `MessageCodec`) | ported | The reusable buffer is the caller's `ArrayBufferWriter<byte>`; zero allocation after warm-up is pinned by `CodecAllocationTests`. `marshal_test.go` uses `LogEntry` (replication.proto, not a client message): its properties (reuse, no allocation) are covered by `CodecAllocationTests`, not ported 1:1. |
+| `client.pb.go` field layout (hand-written equivalents) | `src/Oxia.Common/Proto/ClientMessages.cs` (owned by the lead) | partial (A only adds members) | A added `internal int CachedSize` memo fields and `Spares<T>` recycling to `Reset()` of the response-side classes; no member renamed or removed. `Codec/Spares.cs` is the helper. |
+
+### `common/proto/client_grpc.pb.go`, `proto_grpc.go`, `common/rpc/*` (gRPC surface)
+
+| Upstream file | C# file | Status | Notes (divergences, extra tests) |
+|---|---|---|---|
+| `client_grpc.pb.go` (service descriptor, method full names, streaming flags) | `src/Oxia.Common/Proto/OxiaClientMethods.cs` | ported | `Method<TReq,TResp>` for all 11 rpcs (full names `/io.oxia.proto.v1.OxiaClient/<Rpc>`; GetShardAssignments/Read/List/RangeScan/GetSequenceUpdates/GetNotifications server-streaming, Write/CreateSession/KeepAlive/CloseSession unary, WriteStream duplex); `Marshaller<T>` built on the codecs (`CodecMarshaller`). Checked against the protoc-generated descriptor by `OxiaClientMethodsTests`. |
+| `proto_grpc.go` (vtproto `CodecV2` for grpc-go) | `OxiaClientMethods.cs` (`CodecMarshaller.Serialize/Deserialize`) | ported (merged) | grpc-go needs a registered codec; gRPC.NET takes marshallers per method. Serializer: `Size` -> `SetPayloadLength` -> encode into `GetBufferWriter()` -> `Complete`. Deserializer: `PayloadAsReadOnlySequence()` (single-segment payloads take the contiguous fast path). The Go tests of the codec registry / health-service fallback / `EncodedNotificationBatch` (server only) have no .NET counterpart; round-trip, multi-segment input and "unmarshal owns the bytes" are covered by `OxiaClientMethodsTests` and `CodecWireTests.ParsedMessagesOwnTheirBytes_*`. |
+| `common/rpc/oxia_error_streaming_client.go` (`OxiaErrorServerStreamingClient`, `OxiaErrorBidiStreamingClient`) | `src/Oxia.Common/Proto/OxiaClientRpc.cs` (`ServerStreamingClient<T>`, `WriteStreamCall`, `GrpcErrors`) | ported | `Recv() (msg, io.EOF)` -> `RecvAsync()` returning `null` at the end. Failures go through `OxiaErrors.FromGrpcError`: an Oxia error is thrown as `TranslatedGrpcException` (message = sentinel's, `OxiaErrors.Is(thrown, sentinel)` true via `IErrorIs`, **InnerException = the original `RpcException`** so `FromGrpcError(thrown)` still yields the leader-hint metadata and `GrpcCode(thrown)` the status code — Go drops that information in the wrapper, the .NET RpcProvider needs it); any other failure is rethrown untouched. `OxiaErrorClientStreamingClient` skipped: no client-streaming rpc in the service. |
+| `common/rpc/logging_client_rpc.go` (`loggingClientRpc`, a pure pass-through) | `OxiaClientRpc.cs` (`OxiaClientRpc`) | ported (merged) | The decorator only forwards, so `OxiaClientRpc` (typed client over a `CallInvoker`) is the single implementation. The deprecated unary `Write` is `OxiaClientRpc.WriteAsync` (not part of `IOxiaClientRpc`). |
+| `common/rpc/logging_client_rpc_test.go` | `tests/Oxia.Client.Tests/Proto/LoggingClientRpcTests.cs` | ported (3 of 3) | `TestLoggingClientRpcWrite`, `TestLoggingClientRpcGetNotifications`, `TestLoggingClientRpcGetSequenceUpdates` over a fake `CallInvoker`; "returns nil result + error" becomes "throws that error". |
+
+## Tests (all new unless noted; `tests/Oxia.Client.Tests/Proto`)
+
+| File | What it pins |
+|---|---|
+| `ProtoTestKit.cs` | seeded reflection-based random message generator (edge values, optional presence, multi-byte UTF-8 / surrogate pairs, big values), hand -> Google oracle mapper, structural dump, `Segments` / `ChunkedBufferWriter` / `WireScanner` / `WireBuilder` helpers, registry `MessageKinds.All` of the 35 messages |
+| `CodecDifferentialTests.cs` | per message (35): hand bytes parsed by Google.Protobuf; Google bytes parsed by the hand parser; byte-for-byte equality with `ToByteArray()` (and `Size == CalculateSize`); chunked output writers; reuse of a parsed-into instance; `Reset()`; multi-segment input split at EVERY offset (+3-way splits, 1-byte segments); truncation at every offset (throws exactly when the cut is not a top-level field boundary, found by an independent wire scanner); unknown top-level fields of all wire types; mutation fuzz (only `ProtoParseException` may escape); a guard that fails when a message of `client.proto` has no codec registered |
+| `CodecWireTests.cs` | hand-crafted wire inputs (packed + unpacked deltas, duplicates, wrong wire types, unknown fields inside nested messages, groups, non-minimal varints, 10-byte negatives, map entry oddities), malformed inputs (zero tag, bad lengths, overlong varints, stray / mismatched groups, lengths past the enclosing message), UTF-8 length-prefix boundaries (0..20000 chars, 1/2/3/4-byte chars) on roomy and exactly-sized destinations, lone surrogates, invalid UTF-8, large values (0, 64 KiB +/- 1, 1 MiB +/- 1, 5 MB) through 4 KiB output chunks and 1 KiB input segments, 20 000-element repeated fields, messages around the 16 KiB block-writer limit, stale-size detection, "parsed messages own their bytes" |
+| `CodecAllocationTests.cs` | `GC.GetAllocatedBytesForCurrentThread`: encoding a WriteRequest with 1000 puts (+50 deletes, 5 delete-ranges) into a reused `ArrayBufferWriter` = 0 bytes, also through the gRPC serializer; WriteResponse (1000 puts) parsed into a reused instance = 0 bytes (contiguous and multi-segment); with keys / values / notification keys only the strings and arrays are allocated; children recycled without aliasing |
+| `OxiaClientMethodsTests.cs` | descriptors vs `Io.Oxia.Proto.V1.OxiaClient.Descriptor`; all 20 marshallers round-trip through fake gRPC contexts (single and multi-segment payloads) |
+| `OxiaClientRpcTests.cs` | every rpc over a REAL gRPC channel (Kestrel h2c on loopback, mock service derived from `OxiaClient.OxiaClientBase`, `TestGrpcServer`): unary calls, all server-streaming calls, WriteStream ping-pong (200 rounds, headers), end of stream, 3 MB values, parallel reads, Oxia errors translated and the original `RpcException` / leader hint / status code still reachable, non-Oxia errors rethrown unchanged, token / `Dispose` cancellation (server observes it), `Context` cancelled when the stream ends |
+| `LoggingClientRpcTests.cs` | the 3 ported Go tests + extras over a fake `CallInvoker` |
+
+## Benchmarks
+
+`benchmarks/Oxia.Client.Benchmarks/Codec/CodecBenchmarks.cs` (`WriteRequestEncodeBenchmarks`, `WriteResponseParseBenchmarks`,
+`GetResponseParseBenchmarks`; hand codec vs the protoc-generated Google.Protobuf classes).  The project's `Program.cs` must dispatch with
+`BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args)`; run
+`dotnet run -c Release --project benchmarks/Oxia.Client.Benchmarks -- --filter "*Oxia.Client.Benchmarks.Codec*" --job short`.
+
+Numbers of a `--job short` run (Intel Core Ultra 9 185H, .NET 10.0.14, shared noisy machine -- take ratios, not absolutes;
+Google = `WriteTo(IBufferWriter)` / `Parser.ParseFrom`, hand = `Write(IBufferWriter)` / `Parse` into a reused instance; allocation 0 B everywhere on the hand side except where noted):
+
+| Scenario | Google | Hand | Ratio |
+|---|---|---|---|
+| WriteRequest encode, 1 put (key 28 chars, 100 B value) | 84 ns | 60 ns | 0.72 |
+| WriteRequest encode, 100 puts | 6.15 us | 4.14 us | 0.67 |
+| WriteRequest encode, 1000 puts | 65.8 us | 34.1 us | 0.52 |
+| WriteResponse parse, 1 put response | 169 ns, 528 B | 33 ns, 0 B | 0.20 |
+| WriteResponse parse, 100 put responses | 4.75 us, 15.2 KB | 2.59 us, 0 B | 0.55 |
+| WriteResponse parse, 1000 put responses | 70.0 us, 144.8 KB | 36.6 us, 0 B | 0.52 |
+| same, 1000 puts, input split in 4 KiB segments | 72.6 us, 144.7 KB | 38.1 us, 0 B | 0.55 |
+| same, 1000 puts, hand into a NEW message (what the gRPC deserializer does) | 70.0 us, 144.8 KB | 49.7 us, 144.8 KB | 0.71 |
+| GetResponse parse (version + 100 B value) | 139 ns, 472 B | 47-57 ns, 128 B (the value array only) | 0.34-0.41 |
+| ReadResponse parse, 100 get responses (100 B values) | 9.95 us, 32.7 KB | 7.37 us, 12.8 KB (the value arrays only) | 0.74 |
+
+Where the time goes (1000 puts): `Size()` 8.8 us hand vs 13.4 us Google (`CalculateSize`), the rest is the write pass; the ASCII fast path
+(`Ascii.IsValid` 1 ns instead of `GetByteCount` 7 ns; vector narrowing instead of `Encoding.UTF8.GetBytes` 11 ns) and the reserved-block writer
+(local position instead of ref-struct field traffic, one capacity check per put) took the encode from 0.9-1.07x to 0.52x of Google.

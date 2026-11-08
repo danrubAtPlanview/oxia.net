@@ -21,9 +21,15 @@
 //   Every message has Reset() so a pooled instance can be reused.  Messages are NOT thread-safe.
 //   NOTE: protoc also generates Google.Protobuf classes for the same file in namespace Io.Oxia.Proto.V1 (needed by the
 //   admin API and used as the wire-format oracle in tests).  Never import both namespaces unaliased in one file.
+//   Wire-codec additions (component A): every nested-capable message has an `internal int CachedSize` memo that
+//   Codec `Size()` fills and `WriteTo()` reads (so nested lengths are computed once); response-side messages recycle
+//   their children on Reset() through `Spares<T>` (re-parsing into a Reset() instance allocates nothing).  Both are
+//   internal and invisible to users of the classes except that a child object must not outlive a Reset() of its parent.
 //   Sync procedure: when client.proto changes upstream, copy the .proto into Proto/, then mirror the field in this
 //   file, in the codec, and in the oracle tests (tests/Oxia.Client.Tests/Proto).
 // =====================================================================================================================
+using Oxia.Common.Proto.Codec;
+
 namespace Oxia.Common.Proto;
 
 /// <summary>proto: <c>Status</c>.</summary>
@@ -49,6 +55,7 @@ public class ShardAssignmentsRequest
 
 public class Int32HashRange
 {
+    internal int CachedSize;
     public uint MinHashInclusive;
     public uint MaxHashInclusive;
     public void Reset() { MinHashInclusive = 0; MaxHashInclusive = 0; }
@@ -56,6 +63,7 @@ public class Int32HashRange
 
 public class ShardAssignment
 {
+    internal int CachedSize;
     public long Shard;
     public string Leader = "";
     /// <summary>oneof shard_boundaries { Int32HashRange int32_hash_range = 3; } -- null when no boundary is set.</summary>
@@ -65,6 +73,7 @@ public class ShardAssignment
 
 public class NamespaceShardsAssignment
 {
+    internal int CachedSize;
     public List<ShardAssignment> Assignments { get; } = new();
     public ShardKeyRouter ShardKeyRouter;
     public KeySorting KeySorting;
@@ -80,6 +89,7 @@ public class ShardAssignments
 
 public class SecondaryIndex
 {
+    internal int CachedSize;
     public string IndexName = "";
     public string SecondaryKey = "";
     public void Reset() { IndexName = ""; SecondaryKey = ""; }
@@ -88,6 +98,7 @@ public class SecondaryIndex
 /// <summary>proto: <c>Version</c> (record version metadata returned by the server).</summary>
 public class ProtoVersion
 {
+    internal int CachedSize;
     public long VersionId;
     public long ModificationsCount;
     public ulong CreatedTimestamp;
@@ -103,6 +114,7 @@ public class ProtoVersion
 
 public class PutRequest
 {
+    internal int CachedSize;
     public string Key = "";
     public ReadOnlyMemory<byte> Value;
     public long? ExpectedVersionId;
@@ -127,14 +139,22 @@ public class PutRequest
 
 public class PutResponse
 {
+    internal int CachedSize;
+    internal ProtoVersion? SpareVersion;
     public Status Status;
     public ProtoVersion? Version;
     public string? Key;
-    public void Reset() { Status = default; Version = null; Key = null; }
+    public void Reset()
+    {
+        Status = default;
+        if (Version is { } v) { v.Reset(); SpareVersion = v; Version = null; }
+        Key = null;
+    }
 }
 
 public class DeleteRequest
 {
+    internal int CachedSize;
     public string Key = "";
     public long? ExpectedVersionId;
     public string? PartitionKey;
@@ -144,12 +164,14 @@ public class DeleteRequest
 
 public class DeleteResponse
 {
+    internal int CachedSize;
     public Status Status;
     public void Reset() { Status = default; }
 }
 
 public class DeleteRangeRequest
 {
+    internal int CachedSize;
     public string StartInclusive = "";
     public string EndExclusive = "";
     public uint OpIndex;
@@ -158,6 +180,7 @@ public class DeleteRangeRequest
 
 public class DeleteRangeResponse
 {
+    internal int CachedSize;
     public Status Status;
     public void Reset() { Status = default; }
 }
@@ -173,14 +196,24 @@ public class WriteRequest
 
 public class WriteResponse
 {
+    internal Spares<PutResponse> SparePuts;
+    internal Spares<DeleteResponse> SpareDeletes;
+    internal Spares<DeleteRangeResponse> SpareDeleteRanges;
     public List<PutResponse> Puts { get; } = new();
     public List<DeleteResponse> Deletes { get; } = new();
     public List<DeleteRangeResponse> DeleteRanges { get; } = new();
-    public void Reset() { Puts.Clear(); Deletes.Clear(); DeleteRanges.Clear(); }
+    public void Reset()
+    {
+        foreach (var e in Puts) { e.Reset(); SparePuts.Push(e); }
+        foreach (var e in Deletes) { e.Reset(); SpareDeletes.Push(e); }
+        foreach (var e in DeleteRanges) { e.Reset(); SpareDeleteRanges.Push(e); }
+        Puts.Clear(); Deletes.Clear(); DeleteRanges.Clear();
+    }
 }
 
 public class GetRequest
 {
+    internal int CachedSize;
     public string Key = "";
     public bool IncludeValue;
     public KeyComparisonType ComparisonType;
@@ -190,12 +223,19 @@ public class GetRequest
 
 public class GetResponse
 {
+    internal int CachedSize;
+    internal ProtoVersion? SpareVersion;
     public Status Status;
     public ProtoVersion? Version;
     public byte[]? Value;
     public string? Key;
     public string? SecondaryIndexKey;
-    public void Reset() { Status = default; Version = null; Value = null; Key = null; SecondaryIndexKey = null; }
+    public void Reset()
+    {
+        Status = default;
+        if (Version is { } v) { v.Reset(); SpareVersion = v; Version = null; }
+        Value = null; Key = null; SecondaryIndexKey = null;
+    }
 }
 
 public class ReadRequest
@@ -207,8 +247,13 @@ public class ReadRequest
 
 public class ReadResponse
 {
+    internal Spares<GetResponse> SpareGets;
     public List<GetResponse> Gets { get; } = new();
-    public void Reset() { Gets.Clear(); }
+    public void Reset()
+    {
+        foreach (var e in Gets) { e.Reset(); SpareGets.Push(e); }
+        Gets.Clear();
+    }
 }
 
 public class ListRequest
@@ -252,9 +297,14 @@ public class RangeScanRequest
 
 public class RangeScanResponse
 {
+    internal Spares<GetResponse> SpareRecords;
     public List<GetResponse> Records { get; } = new();
     public bool EndInclusive;
-    public void Reset() { Records.Clear(); EndInclusive = false; }
+    public void Reset()
+    {
+        foreach (var e in Records) { e.Reset(); SpareRecords.Push(e); }
+        Records.Clear(); EndInclusive = false;
+    }
 }
 
 public class GetSequenceUpdatesRequest
@@ -311,6 +361,7 @@ public class NotificationsRequest
 
 public class Notification
 {
+    internal int CachedSize;
     public NotificationType Type;
     public long? VersionId;
     public string? KeyRangeLast;
@@ -319,17 +370,29 @@ public class Notification
 
 public class NotificationEntry
 {
+    internal int CachedSize;
+    internal Notification? SpareValue;
     /// <summary>optional string key = 1 -- presence is tracked so an empty key is still emitted.</summary>
     public string? Key;
     public Notification? Value;
-    public void Reset() { Key = null; Value = null; }
+    public void Reset()
+    {
+        Key = null;
+        if (Value is { } v) { v.Reset(); SpareValue = v; Value = null; }
+    }
 }
 
 public class NotificationBatch
 {
+    internal Spares<NotificationEntry> SpareNotifications;
     public long Shard;
     public long Offset;
     public ulong Timestamp;
     public List<NotificationEntry> Notifications { get; } = new();
-    public void Reset() { Shard = 0; Offset = 0; Timestamp = 0; Notifications.Clear(); }
+    public void Reset()
+    {
+        Shard = 0; Offset = 0; Timestamp = 0;
+        foreach (var e in Notifications) { e.Reset(); SpareNotifications.Push(e); }
+        Notifications.Clear();
+    }
 }
