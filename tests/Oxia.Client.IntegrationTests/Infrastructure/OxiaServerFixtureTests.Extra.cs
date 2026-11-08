@@ -101,6 +101,34 @@ public class OxiaServerFixtureTests(OxiaServerFixture oxia)
         Assert.Contains("Started Grpc server", log);
     }
 
+    /// <summary>
+    /// The Go tests pick their keys so that they land on different shards of a standalone server (they `require` it themselves,
+    /// computing the shard with xxh3 + GenerateShards).  This checks those preconditions with the .NET hash, so a mismatch of the hash
+    /// (component B) shows up here instead of as a puzzling failure in the key sorting tests.
+    /// </summary>
+    [Fact]
+    public void Sharding_PreconditionsOfTheGoTestsHold()
+    {
+        // TestSyncClientImpl_FloorCeilingGetKeySorting: the two keys of every case are on different shards (4 shards)
+        string[][] pairs =
+        [
+            ["a/x", "b"], ["b/x", "c"], ["a/x", "ab/y"], ["b/x", "a/y/z"],
+        ];
+        foreach (var pair in pairs)
+        {
+            Assert.NotEqual(Sharding.ShardOf(pair[0], 4), Sharding.ShardOf(pair[1], 4));
+        }
+
+        // TestSyncClientImpl_RangeScanUseIndexKeySorting: the eight records are spread over all 4 shards
+        Assert.Equal(4, Enumerable.Range(1, 8).Select(i => Sharding.ShardOf("p" + i, 4)).Distinct().Count());
+
+        // TestSyncClientImplListAndRangeScanEndInclusive: the records of "/t/k-1" are on several shards
+        Assert.True(new[] { "p-0", "p-3", "p-4" }.Select(k => Sharding.ShardOf(k, 4)).Distinct().Count() > 1);
+
+        // TestSyncClientImpl_GetSequenceUpdates_MultipleShards: partition key "x" does not route to shard 0 of 10
+        Assert.True(Oxia.Common.Hash.Hasher.Xxh332("x") > Sharding.GenerateShards(0, 10)[0].Max);
+    }
+
     [Fact]
     public void Sharding_MatchesGoArithmetic()
     {
