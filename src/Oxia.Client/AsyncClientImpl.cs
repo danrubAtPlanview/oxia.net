@@ -296,6 +296,22 @@ internal sealed class AsyncClientImpl : IAsyncClient
 
     private void HandOffToWriteManager(long shardId, object call) => WriteBatchManager.HandOff(shardId, call);
 
+    /// <summary>
+    /// Adds a plain write (no session) of the caller to the batcher of a shard, behind the ephemeral puts of the same caller that still
+    /// wait for their session.  Lock-free and allocation-free unless such a put is pending.
+    /// </summary>
+    private void AddPlainWrite(long shardId, object call)
+    {
+        if (Sessions is { HasWaitingOperations: true } sessions)
+        {
+            sessions.ExecuteOrdered(() => AddToWriteManager(shardId, call));
+            return;
+        }
+
+        var add = WriteBatchManager.AddAsync(shardId, call);
+        if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, call);
+    }
+
     /// <summary>Adds a call to the batcher of a shard without waiting for room: a failure to add fails the call.</summary>
     internal void AddToWriteManager(long shardId, object call)
     {
@@ -436,8 +452,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
             return result;
         }
 
-        var add = WriteBatchManager.AddAsync(GetShardForKey(key, opts.PartitionKey), call);
-        if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, call);
+        AddPlainWrite(GetShardForKey(key, opts.PartitionKey), call);
         return result;
     }
 
@@ -454,8 +469,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
         call.CallContext = opts.CallContext;
         var result = call.AsValueTask();
 
-        var add = WriteBatchManager.AddAsync(GetShardForKey(key, opts.PartitionKey), call);
-        if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, call);
+        AddPlainWrite(GetShardForKey(key, opts.PartitionKey), call);
         return result;
     }
 
@@ -499,7 +513,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
 
         foreach (var shardId in shardIds)
         {
-            AddToWriteManager(shardId, new DeleteRangeCall
+            AddPlainWrite(shardId, new DeleteRangeCall
             {
                 MinKeyInclusive = minKeyInclusive,
                 MaxKeyExclusive = maxKeyExclusive,
@@ -522,7 +536,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
             CallContext = callContext,
         };
         var result = call.AsValueTask();
-        AddToWriteManager(shardId, call);
+        AddPlainWrite(shardId, call);
         return result;
     }
 
