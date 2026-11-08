@@ -12,6 +12,9 @@
 //                  before handing the request to gRPC (prepare may drop the operations that must not be sent anymore);
 //                * the response of a request whose caller gave up (deadline) is still consumed, to keep the FIFO aligned.
 //   Divergences:
+//      * Wave 2 / Z1: the Future<WriteResponse> of a request is reused (a small per-stream stack) when the request finished normally or with a
+//        failure of the stream -- i.e. the receive loop dequeued the future before completing it; a request that gave up (its token fired)
+//        leaves its future in the queue and never reuses it.  The response handed to the caller is a pooled WriteResponse owned by it.
 //      * Go holds one mutex around "append + stream.Send" and the receive goroutine takes the same mutex.  gRPC.NET's
 //        SendAsync must not overlap and awaits the transport, so the sends are serialised with a SemaphoreSlim, while the
 //        pending queue has its own tiny lock: the receive loop never waits behind a send blocked on flow control.

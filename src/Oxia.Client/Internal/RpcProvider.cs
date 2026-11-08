@@ -19,6 +19,8 @@
 //                  hook).  The stream outlives the request that created it, but its setup does not: the request token cancels
 //                  the setup.  The stream carries the `namespace` and `shard-id` headers.
 //   Divergences:
+//      * Wave 2 / Z1: ExecuteRead merges a further chunk of the stream into the first response with ReadResponse.Absorb (a pooled chunk's gets
+//        move, the chunk goes back to the pool); ExecuteList / ExecuteRangeScan release each response after the consumer's task completed.
 //      * ctx -> CancellationToken, (T, error) -> thrown exceptions on these cold/failure paths (the Retry helper of Oxia.Common
 //        signals failures by throwing).  The errors that Go returns as the sentinel are thrown as `OxiaErrors.ToThrowable(sentinel)`
 //        (a fresh exception that still satisfies OxiaErrors.Is) -- shared sentinels are never thrown.  errShardHasNoLeader is a

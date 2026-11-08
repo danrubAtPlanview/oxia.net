@@ -25,6 +25,12 @@
 //   Codec `Size()` fills and `WriteTo()` reads (so nested lengths are computed once); response-side messages recycle
 //   their children on Reset() through `Spares<T>` (re-parsing into a Reset() instance allocates nothing).  Both are
 //   internal and invisible to users of the classes except that a child object must not outlive a Reset() of its parent.
+//   Response recycling (wave 2 / Z1, docs/performance-allocation.md): the top-level RESPONSES the gRPC deserializers produce
+//   (WriteResponse, ReadResponse, RangeScanResponse, ListResponse, NotificationBatch) come from per-type pools (`Rent()`), and their final
+//   consumer gives them back with `Release()` (idempotent; a harmless no-op on a message made with `new`, e.g. by a test fake).  A released
+//   message is Reset() -- its children go to the Spares -- so nothing read from it may be used afterwards; Debug builds throw
+//   ObjectDisposedException when the lists of a released message are touched.  `PoolState`, `Lease`, `PooledValues` and the helpers are
+//   internal (the test kit reflects over the public members).  GetResponse can hold its value / key bytes in a ValueLease (pooled read API).
 //   Sync procedure: when client.proto changes upstream, copy the .proto into Proto/, then mirror the field in this
 //   file, in the codec, and in the oracle tests (tests/Oxia.Client.Tests/Proto).
 // =====================================================================================================================

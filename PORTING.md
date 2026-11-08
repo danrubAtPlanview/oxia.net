@@ -49,6 +49,7 @@ Run everything: `dotnet test tests/Oxia.Client.Tests -c Release` and `dotnet tes
 * [F1 — sessions, notifications, sequences, cache](docs/porting/F1-sessions.md)
 * [F2 — clients & admin](docs/porting/F2-clients.md)
 * [T — test infrastructure & integration tests](docs/porting/T-integration.md)
+* [Z1 — end-to-end allocation elimination (wave 2)](docs/porting/Z1-allocation.md) — design, ownership protocol and measurements: [`docs/performance-allocation.md`](docs/performance-allocation.md)
 
 ## Licence
 

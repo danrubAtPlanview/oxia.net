@@ -13,6 +13,8 @@
 //                stream (io.EOF in Go) is handled(OK), any read error is handled(code of the error); a call that cannot be
 //                created is handled(code).
 //   Divergences:
+//      * Wave 2 / Z1: the monitored reader / writer also implement IObservedStreamReader / IObservedStreamWriter (ValueTask + pooled box instead of
+//        a Task + a fresh async state machine per message); OxiaClientRpc uses them when present.  The counters are the same.
 //      * OTel Go meter "oxia" (observable counters over striped adders) -> System.Diagnostics.Metrics.Meter "oxia" with
 //        synchronous Counter<long> instruments of the same names / unit "1" / descriptions; the host picks them up with a
 //        MeterListener or OpenTelemetry's AddMeter("oxia").  The meter can be replaced (tests) through the constructor.

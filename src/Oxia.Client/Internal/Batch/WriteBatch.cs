@@ -17,6 +17,11 @@
 //                index, instead (when one is set).
 //              * Metrics: calls are decorated on Add, the batch is measured when it completes.
 //   Divergences:
+//      * Wave 2 / Z1: the batch is the CONSUMER of the pooled WriteResponse -- it releases it (Release(), a no-op for a response made
+//        with `new`) after the calls took what they need; every per-call Complete is wrapped (SafeComplete): an exception from the
+//        application's code (a Callback, a metrics observer) is logged and does not stop the other calls nor reach the batcher's
+//        catch-all `batch.Fail`, which would complete calls twice (they may be recycled by then); an exception from the rerouter (which owns
+//        the calls once invoked) is logged and dropped for the same reason.  CompleteAsync uses the pooling async method builder.
 //      * `Complete()` is `CompleteAsync()`; the executor's `(response, error)` is a ValueTask<WriteResponse> that throws; the
 //        `prepare func() (*WriteRequest, error)` is a Func<WriteRequest> that throws (errCallsDropped) -- allocated once per
 //        pooled batch, not per attempt.

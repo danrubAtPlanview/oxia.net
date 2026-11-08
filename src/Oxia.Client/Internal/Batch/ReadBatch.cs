@@ -6,6 +6,10 @@
 //              If the shard is gone from the shard map (ErrShardNotFound) and a rerouter is set, the gets are re-routed to
 //              the shards that replaced it instead of failing.  Any other error fails every get.
 //   Divergences:
+//      * Wave 2 / Z1: the batch is the CONSUMER of the pooled ReadResponse -- it releases it after the gets took what they need (value
+//        arrays are the caller's, leases of the pooled read API were detached); a batch holding a pooled-value get (Oxia.Client.Pooled)
+//        asks the transport for pooled values (ReadRequest.PooledValues); per-call completions are wrapped like in WriteBatch
+//        (SafeComplete) and a throwing rerouter is logged and dropped.
 //      * `Complete()` is `CompleteAsync()`; Go's `(response, error)` from the executor is a ValueTask<ReadResponse> that
 //        throws: the exception is the error (caught once, in CompleteAsync; the failure path may allocate).
 //      * The batch is POOLED: it implements IRecyclableBatch and the batcher gives it back after CompleteAsync / Fail; the

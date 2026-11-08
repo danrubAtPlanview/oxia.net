@@ -9,6 +9,11 @@
 //              Google.Protobuf objects, no intermediate byte[].  Every Recv/Send/unary failure passes through
 //              OxiaErrors.FromGrpcError, exactly like Go's Oxia* stream wrappers.
 //   Divergences:
+//      * Wave 2 / Z1: Read / RangeScan use the pooled-value method descriptors when the request asks for them (PooledValues); the
+//        stream wrappers use the pooling async method builder and, when the call goes through the metrics interceptor, its
+//        allocation-free observed reads / writes (IObservedStreamReader / Writer) instead of Task<bool> wrappers; SendAsync on a
+//        stream the server already ended throws TranslatedGrpcException(EndOfStream) -- Go's io.EOF, retryable -- unless the failure is
+//        the client's own (token cancelled).
 //      * Go `Recv() (msg, io.EOF)` is `RecvAsync()` returning null at the end of the stream; failures are thrown.
 //      * Error translation KEEPS the original exception: when FromGrpcError maps the failure to an Oxia sentinel, the
 //        thrown exception is a TranslatedGrpcException whose Message is the sentinel's, which satisfies

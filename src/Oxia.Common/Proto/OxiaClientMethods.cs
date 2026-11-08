@@ -8,7 +8,10 @@
 //              hand-written codecs (Oxia.Common.Proto.Codec): the serializer sets the payload length, encodes straight into the
 //              transport's IBufferWriter<byte> and completes; the deserializer decodes straight from the transport's
 //              ReadOnlySequence<byte> (a single-segment payload takes the contiguous-span fast path).
-//   Divergences: Go registers codecs globally (encoding.RegisterCodec with vtproto) and looks methods up by name in a
+//   Divergences: Wave 2 / Z1: the response marshallers of WriteResponse, ReadResponse, RangeScanResponse, ListResponse and NotificationBatch RENT their
+//              message from a pool (CodecMarshaller.CreatePooled; the consumer Release()s it), KeepAlive / CloseSession responses are one shared
+//              instance, and ReadPooled / RangeScanPooled (internal) are the same rpcs with values / keys parsed into ValueLeases.
+//              Go registers codecs globally (encoding.RegisterCodec with vtproto) and looks methods up by name in a
 //              ServiceDesc; here the descriptors are plain static fields.  Method full names are exactly
 //              "/io.oxia.proto.v1.OxiaClient/<Rpc>", identical to the protoc-generated Io.Oxia.Proto.V1.OxiaClient.
 //              `List` is deprecated upstream (use RangeScan with include_values=false) and `Write` is deprecated in favour of
