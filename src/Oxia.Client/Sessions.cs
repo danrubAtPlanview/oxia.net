@@ -20,6 +20,8 @@
 //        the head and drains the queue under the lock, so the callback may run later, on another thread.  When the session
 //        already exists and nothing is queued, the callback runs inline on the caller's thread WITHOUT taking the lock and
 //        without allocating (lock-free read of a ConcurrentDictionary; the lock is only taken to create/move/forget sessions).
+//      * ExecuteOrdered (review R2-D3): a plain write issued while an ephemeral put waits for its session is queued in the same FIFO, so it
+//        cannot overtake it (Go's Put blocks in Add until the ephemeral call is in the batcher).  Inline and lock-free when nothing waits.
 //      * `cs.started chan error` -> flags under the session's lock; the operation waiting on it registers as the session's
 //        `waiter` (plus a cancellation registration on the session token) and is resumed through OnSessionSettled.
 //      * contexts -> CancellationTokenSource (sessions token linked to the client token; session token linked to the
@@ -63,6 +65,7 @@ internal sealed class Sessions : IAsyncCloser
         public Action<long, long, Exception?> Callback;
         public long ShardId;
         public ClientSession? Session;   // the session the operation waits for (Current only)
+        public Action? Work;             // a plain operation that only has to run in order (ExecuteOrdered)
     }
 
     internal readonly string ClientIdentity;
@@ -111,6 +114,31 @@ internal sealed class Sessions : IAsyncCloser
     internal void CancelSessions()
     {
         try { _sessionsCts.Cancel(); } catch (ObjectDisposedException) { }
+    }
+
+    /// <summary>True while an operation waits for its session or others are queued behind it: writes issued now must queue behind them.</summary>
+    internal bool HasWaitingOperations => Volatile.Read(ref _blocked) != 0;
+
+    /// <summary>
+    /// Runs <paramref name="work"/> after the operations that wait for a session -- inline when none does.  A write without a session
+    /// issued by the caller of an ephemeral put whose session is still being created must not overtake it: Go's Put returns only once the
+    /// call is in the batcher of its shard (executeWithSessionId holds the mutex until then), so the next Put of the same goroutine is
+    /// added after it.  (Review R2-D3.)
+    /// </summary>
+    internal void ExecuteOrdered(Action work)
+    {
+        if (Volatile.Read(ref _blocked) != 0)
+        {
+            lock (_sync)
+            {
+                if (_hasCurrent)
+                {
+                    _queue.Enqueue(new Op { Work = work });
+                    return;
+                }
+            }
+        }
+        work();
     }
 
     /// <summary>
@@ -235,6 +263,18 @@ internal sealed class Sessions : IAsyncCloser
             RunOp(op.ShardForKey, op.Callback, op.Session, op.ShardId, guard: true);
             while (!_hasCurrent && _queue.TryDequeue(out var next))
             {
+                if (next.Work is { } work)
+                {
+                    try
+                    {
+                        work();
+                    }
+                    catch (Exception e)
+                    {
+                        Log.LogError(e, "An operation queued behind a session failed");
+                    }
+                    continue;
+                }
                 RunOp(next.ShardForKey, next.Callback, null, 0, guard: true);
             }
             UpdateBlocked();

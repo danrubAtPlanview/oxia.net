@@ -27,6 +27,12 @@ public class BatcherFactory
     /// <summary>Go: MaxRequestsPerBatch.</summary>
     public int MaxRequestsPerBatch { get; set; }
 
+    /// <summary>Process-wide default of <see cref="ExperimentalMaxInFlight"/> (benchmarks only).</summary>
+    internal static int ExperimentalMaxInFlightDefault { get; set; } = 1;
+
+    /// <summary>UNSAFE MEASUREMENT SWITCH, see BatcherImpl.ExperimentalMaxInFlight: batches in flight per batcher (1 = the contract).</summary>
+    internal int ExperimentalMaxInFlight { get; set; } = ExperimentalMaxInFlightDefault;
+
     /// <summary>Capacity of the queue of each batcher (back-pressure threshold). 0 = <see cref="BatcherChannelBufferSize"/>.</summary>
     public int QueueCapacity { get; set; }
 
@@ -34,7 +40,7 @@ public class BatcherFactory
     public IBatcher NewBatcher(CancellationToken ct, long shard, string batcherType, Func<IBatch> batchFactory)
     {
         var batcher = new BatcherImpl(batchFactory, QueueCapacity > 0 ? QueueCapacity : BatcherChannelBufferSize,
-            Linger, MaxRequestsPerBatch);
+            Linger, MaxRequestsPerBatch, ExperimentalMaxInFlight);
 
         // The loop never throws (it logs and continues), so the returned task needs no observation.
         _ = batcher.RunAsync();

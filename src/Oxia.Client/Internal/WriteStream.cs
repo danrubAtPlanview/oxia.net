@@ -88,7 +88,10 @@ internal sealed class StreamWrapper
         Shard = shard;
 
         // go process.DoWithLabels(stream.Context(), ..., sw.handleResponses)
-        _ = Task.Run(HandleResponsesAsync);
+        using (ExecutionContext.SuppressFlow()) // a goroutine inherits nothing from the caller that created the stream
+        {
+            _ = Task.Run(HandleResponsesAsync);
+        }
     }
 
     public long Shard { get; }

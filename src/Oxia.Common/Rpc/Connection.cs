@@ -26,6 +26,8 @@
 //        raised by us (grpc.NewClient does it in Go), wrapped as "error connecting to <target>: ...".
 //      * Close cannot fail (GrpcChannel.Dispose does not report errors); ClientPool still guards against it.
 //      * The OxiaClientRpc / OxiaAdminClient facades are created once per connection (they are stateless over the CallInvoker).
+//      * The health loop is started with the ExecutionContext flow suppressed (it lives as long as the connection, not as long as the
+//        caller that dialled it; a goroutine inherits nothing).  TransportTuning.cs holds optional, off-by-default transport knobs.
 // =====================================================================================================================
 using System.Net.Security;
 using System.Security.Authentication;
@@ -147,6 +149,7 @@ internal sealed class Connection : IAsyncCloser
             EnableMultipleHttp2Connections = true,
             ConnectTimeout = DefaultConnectTimeout, // grpc-go's minimum connect timeout
         };
+        TransportTuning.Apply(handler);
         if (useTls)
         {
             handler.SslOptions = tlsConf ?? new SslClientAuthenticationOptions { EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13 };
@@ -217,7 +220,10 @@ internal sealed class Connection : IAsyncCloser
 
             var channel = GrpcChannel.ForAddress(channelAddress, options);
             var connection = new Connection(target, channel, onFailure, healthInterval, healthPingTimeout, log);
-            connection._healthLoop = Task.Run(connection.HealthCheckLoopAsync);
+            using (ExecutionContext.SuppressFlow()) // the loop lives as long as the pooled connection, not as long as the caller that dialled it
+            {
+                connection._healthLoop = Task.Run(connection.HealthCheckLoopAsync);
+            }
             return connection;
         }
         catch (Exception e)

@@ -36,6 +36,8 @@ public static class ClientErrors
     public static readonly OxiaException InvalidOptionBatchLinger = new("BatchLinger must be greater than or equal to zero");
     public static readonly OxiaException InvalidOptionMaxRequestsPerBatch = new("MaxRequestsPerBatch must be greater than zero");
     public static readonly OxiaException InvalidOptionMaxBatchSize = new("MaxBatchSize must be greater than zero");
+    /// <summary>EXTENSION (not in Go): see OxiaOptions.WithBatchQueueCapacity.</summary>
+    public static readonly OxiaException InvalidOptionBatchQueueCapacity = new("BatchQueueCapacity must be greater than zero");
     public static readonly OxiaException InvalidOptionRequestTimeout = new("RequestTimeout must be greater than zero");
     public static readonly OxiaException InvalidOptionSessionTimeout = new("SessionTimeout must be greater than zero");
     public static readonly OxiaException InvalidOptionIdentity = new("Identity must be non-empty");

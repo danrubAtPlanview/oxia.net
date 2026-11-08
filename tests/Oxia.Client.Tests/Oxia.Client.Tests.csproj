@@ -15,4 +15,8 @@
     <ProjectReference Include="..\..\src\Oxia.Client\Oxia.Client.csproj" />
     <ProjectReference Include="..\Oxia.TestSupport\Oxia.TestSupport.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- the latency histogram of the load generator (benchmarks/Oxia.Client.Benchmarks/Load) is tested here without referencing BenchmarkDotNet -->
+    <Compile Include="..\..\benchmarks\Oxia.Client.Benchmarks\Load\LatencyHistogram.cs" Link="Throughput\LatencyHistogram.Linked.cs" />
+  </ItemGroup>
 </Project>

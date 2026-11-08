@@ -32,6 +32,13 @@
 //        under one lock.  `closed chan struct{}` is a volatile flag + a TaskCompletionSource.
 //      * Close() is Dispose(): idempotent; the batchers' errors are thrown at the end, after ALL were closed.  A gate created
 //        after Close gets a closed batcher (Go: a live batcher that is never closed).
+//      * ORDER OF ONE CALLER'S WRITES (review R1-1).  Go's Put blocks inside Add until the write is in the batcher, so one goroutine's
+//        consecutive Puts reach it in issue order even while the shard holds its writes.  AddAsync returns at once (the caller may
+//        pipeline PutAsync calls without awaiting), so every add that cannot take the lock-free fast path takes a TICKET in the
+//        synchronous part of AddAsync (call order == ticket order) and only starts waiting / forwarding / queueing when the ticket
+//        before it is done (its write is queued, or forwarded to the successors).  The fast path is open only while no ticket is
+//        outstanding (`_slow` is cleared when the chain has drained), so a write issued after a hold was released cannot overtake
+//        the writes still waiting for their turn.  The same chain orders the writes forwarded by a retired gate.
 //      * Calls added to a gate share the single-object-per-call rule of Model.cs: one call instance goes to one batcher; a
 //        delete range for several successors must be cloned (DeleteRangeCall.Clone) by the forwarder.
 // =====================================================================================================================
@@ -258,6 +265,15 @@ internal sealed class WriteGate
     private int _waitingForAdders;
     private TaskCompletionSource? _addersDrained;
 
+    // ---- the FIFO of the writes that take the slow path (guarded by _mu) ----
+    // One caller's consecutive PutAsync calls must reach the batcher in the order they were issued (Go's Put blocks in Add, so the
+    // second one cannot even start before the first is queued).  Every slow-path add takes a ticket SYNCHRONOUSLY, in the order the
+    // calls were made, and starts its work only when the ticket before it is done (its write is queued / forwarded).  The fast path
+    // is only open while no ticket is outstanding: `_slow` is not reset before the chain has drained.
+    private Task _tail = Task.CompletedTask;
+    private int _outstanding;
+    private bool _clearSlowWhenDrained;
+
     // ---- ordered hand-offs ----
     private readonly object _handOffLock = new();
     private Queue<object>? _handOffQueue;
@@ -314,13 +330,36 @@ internal sealed class WriteGate
                 EndAdd();
                 return default;
             }
+            if (Batcher is BatcherImpl)
+            {
+                // The batcher's queue is FIFO and a producer parked on a full queue has already taken its place in line: a Barrier queued
+                // after this point (retire) goes behind it.  So the "read lock" need not be held until the call is really in the queue --
+                // that would cost an async state machine per parked write (not poolable at thousands of parked writes).
+                EndAdd();
+                return t;
+            }
             return AwaitAddAsync(t);
         }
 
         EndAdd();
-        return AddSlowAsync(call);
+        return AddSlow(call);
     }
 
+    /// <summary>The synchronous part of a slow-path add: takes the next ticket (call order == ticket order).</summary>
+    private ValueTask AddSlow(object call)
+    {
+        Task prev;
+        TaskCompletionSource mine = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_mu)
+        {
+            prev = _tail;
+            _tail = mine.Task;
+            _outstanding++;
+        }
+        return AddSlowAsync(call, prev, mine);
+    }
+
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask AwaitAddAsync(ValueTask t)
     {
         try
@@ -333,7 +372,30 @@ internal sealed class WriteGate
         }
     }
 
-    private async ValueTask AddSlowAsync(object call)
+    private async ValueTask AddSlowAsync(object call, Task prev, TaskCompletionSource mine)
+    {
+        try
+        {
+            // the writes issued before this one go first
+            if (!prev.IsCompleted) await prev.ConfigureAwait(false);
+            await AddSlowCoreAsync(call).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_mu)
+            {
+                _outstanding--;
+                if (_outstanding == 0 && _clearSlowWhenDrained)
+                {
+                    _clearSlowWhenDrained = false;
+                    Volatile.Write(ref _slow, 0);
+                }
+            }
+            mine.TrySetResult();
+        }
+    }
+
+    private async ValueTask AddSlowCoreAsync(object call)
     {
         while (true)
         {
@@ -467,9 +529,10 @@ internal sealed class WriteGate
             drain = _retired;
             if (!drain)
             {
-                // The held writes are added after the handed off ones
+                // The held writes are added after the handed off ones; the fast path reopens once they are all queued
                 _held!.TrySetResult();
-                Volatile.Write(ref _slow, 0);
+                if (_outstanding == 0) Volatile.Write(ref _slow, 0);
+                else _clearSlowWhenDrained = true;
             }
         }
 

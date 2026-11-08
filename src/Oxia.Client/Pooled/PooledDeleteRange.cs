@@ -92,7 +92,7 @@ internal sealed class PooledDeleteRange : IValueTaskSource<Exception?>
             call.MaxKeyExclusive = maxKeyExclusive;
             call.PartitionKey = partitionKey;
             call.CallContext = callContext;
-            client.AddToWriteManager(shardIds[i], call);
+            client.AddPlainWrite(shardIds[i], call);
         }
         return result;
     }

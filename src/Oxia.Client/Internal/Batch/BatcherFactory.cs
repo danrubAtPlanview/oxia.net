@@ -11,6 +11,9 @@
 //      * The rerouters are `delegate void` with the Go signatures; the lists they receive are copies the receiver may keep.
 //        A rerouter must not block: it is invoked on the batcher loop of the removed shard (use WriteManager.HandOff, which
 //        keeps the order of the calls without blocking).
+//      * QUEUE CAPACITY.  Go's batcher queue holds GOMAXPROCS calls; here the default is max(4096, MaxRequestsPerBatch) (cap 65536),
+//        `OxiaOptions.WithBatchQueueCapacity` overrides it: a parked .NET caller costs a pooled wait object, a lock and two thread pool hops
+//        (a blocked goroutine ~200 ns), and with the Go size every add of a thousand concurrent callers parked (docs/performance.md).
 //      * The Go value-receiver struct literals `writeBatchFactory{...}.newBatch` become one WriteBatchFactory /
 //        ReadBatchFactory (with the batch pool) per batcher.
 // =====================================================================================================================
@@ -38,9 +41,17 @@ public sealed class BatcherFactory : Oxia.Client.Batch.BatcherFactory
         Executor = executor;
         Linger = linger;
         MaxRequestsPerBatch = maxRequestsPerBatch;
+        QueueCapacity = DefaultQueueCapacity(maxRequestsPerBatch);
         Metrics = metrics;
         RequestTimeout = requestTimeout;
     }
+
+    /// <summary>
+    /// Go: batcherChannelBufferSize = GOMAXPROCS.  A blocked Go sender costs a goroutine park (~200 ns); a parked .NET caller costs a pooled
+    /// wait object, a lock and two thread pool hops, and with the Go size every add of a thousand concurrent callers parked (-40 % throughput,
+    /// docs/performance.md).  The queue holds what arrives while one full batch is in flight.
+    /// </summary>
+    public static int DefaultQueueCapacity(int maxRequestsPerBatch) => Math.Clamp(maxRequestsPerBatch, 4096, 65_536);
 
     public string Namespace { get; }
 

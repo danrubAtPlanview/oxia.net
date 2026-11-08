@@ -112,7 +112,11 @@ public sealed class ShardManager : IShardManager
     /// <summary>Go: start().</summary>
     private async ValueTask<Exception?> StartAsync()
     {
-        _ = Task.Run(ReceiveWithRecoveryAsync);
+        // a goroutine inherits nothing from the caller: the loop must not run in the ambient context (AsyncLocals, Activity) of whoever created the client
+        using (ExecutionContext.SuppressFlow())
+        {
+            _ = Task.Run(ReceiveWithRecoveryAsync);
+        }
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
         timeout.CancelAfter(_requestTimeout);

@@ -22,6 +22,9 @@
 //      * EXTENSION: OxiaOptions.WithMaxBatchSize(int).  Go has DefaultMaxBatchSize, the maxBatchSize field (used by the
 //        write batchers) and ErrInvalidOptionMaxBatchSize, but NO option function to set it; the .NET client exposes it.
 //        Validation follows the declared sentinel (value must be > 0).
+//      * EXTENSION: OxiaOptions.WithBatchQueueCapacity(int).  Go's batcher queue is a channel of GOMAXPROCS calls (an internal constant).  The
+//        .NET client queues up to max(4096, MaxRequestsPerBatch) calls per shard before a caller's add parks (docs/performance.md: with
+//        the Go size every add of a thousand concurrent callers parked, ~40 % of the throughput); this option overrides that default.
 //      * Computed option: Go's `defaultTicker := sessionTimeout / 10` is integer nanosecond division; here the same on
 //        TimeSpan ticks (100 ns).
 // =====================================================================================================================
@@ -90,6 +93,18 @@ public static partial class OxiaOptions
     {
         if (maxBatchSize <= 0) return ClientErrors.InvalidOptionMaxBatchSize;
         options.MaxBatchSize = maxBatchSize;
+        return null;
+    });
+
+    /// <summary>
+    /// EXTENSION (not in Go): how many calls the queue of a shard's batcher holds before the caller that adds one has to wait (back-pressure).
+    /// Default: <c>max(4096, MaxRequestsPerBatch)</c>, capped at 65536 -- enough to absorb the calls that arrive while a full batch is in flight.
+    /// Must be greater than zero (<see cref="ClientErrors.InvalidOptionBatchQueueCapacity"/>).
+    /// </summary>
+    public static ClientOption WithBatchQueueCapacity(int capacity) => new(options =>
+    {
+        if (capacity <= 0) return ClientErrors.InvalidOptionBatchQueueCapacity;
+        options.BatchQueueCapacity = capacity;
         return null;
     });
 
@@ -165,6 +180,9 @@ internal sealed class ClientOptions
     public TimeSpan BatchLinger = OxiaOptions.DefaultBatchLinger;
     public int MaxRequestsPerBatch = OxiaOptions.DefaultMaxRequestsPerBatch;
     public int MaxBatchSize = OxiaOptions.DefaultMaxBatchSize;
+
+    /// <summary>0 = the default (see <see cref="OxiaOptions.WithBatchQueueCapacity"/>).</summary>
+    public int BatchQueueCapacity;
     public TimeSpan RequestTimeout = OxiaOptions.DefaultRequestTimeout;
     public IMeterFactory? MeterFactory;
     public TimeSpan SessionTimeout = OxiaOptions.DefaultSessionTimeout;

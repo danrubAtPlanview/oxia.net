@@ -21,6 +21,9 @@
 //        bounded channel like Go's blocking `ch <- result`.  Each shard therefore buffers its results in an unbounded
 //        per-shard queue and a pump forwards them into the (bounded: List 1 = Go's unbuffered, RangeScan 100) output channel,
 //        dropping them once the caller's token is done.  The streams are still read eagerly (no back-pressure to gRPC).
+//      * A plain write (Put/Delete/DeleteRange without an ephemeral session) goes through AddPlainWrite: lock-free unless an ephemeral put of
+//        the client still waits for its session, in which case it queues behind it (Sessions.ExecuteOrdered).  An add that does not complete
+//        synchronously is watched by a pooled AddObserver (no async state machine); the returned ValueTask is the call's own.
 //      * `go func()` -> Task.Run; `sync.WaitGroup`/`wg.Go` -> a countdown; goroutine-leak assertions of the Go tests ->
 //        RunningStreamTasks (number of List/RangeScan tasks that did not end yet).
 //      * The factory resolves the dial options of a resolver through GrpcResolverBuilder.AsDialOption.
@@ -105,6 +108,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
             options.MaxRequestsPerBatch,
             c.Metrics,
             options.RequestTimeout);
+        if (options.BatchQueueCapacity > 0) batcherFactory.QueueCapacity = options.BatchQueueCapacity;
         batcherFactory.WriteRerouter = c.RerouteWrites;
         batcherFactory.ReadRerouter = c.RerouteReads;
         // The shard manager tells the write batchers when shards are replaced
@@ -300,7 +304,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
             {
                 long shardId = ShardManager.Get(get.PartitionKeyOrKey());
                 var add = ReadBatchManager.Get(shardId).AddAsync(get);
-                if (!add.IsCompletedSuccessfully) _ = ObserveAddAsync(add, get);
+                if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, get);
             }
             catch (Exception e)
             {
@@ -311,23 +315,31 @@ internal sealed class AsyncClientImpl : IAsyncClient
 
     private void HandOffToWriteManager(long shardId, object call) => WriteBatchManager.HandOff(shardId, call);
 
+    /// <summary>
+    /// Adds a plain write (no session) of the caller to the batcher of a shard, behind the ephemeral puts of the same caller that still
+    /// wait for their session.  Lock-free and allocation-free unless such a put is pending.
+    /// </summary>
+    internal void AddPlainWrite(long shardId, object call)
+    {
+        if (Sessions is { HasWaitingOperations: true } sessions)
+        {
+            AddPlainWriteOrdered(sessions, shardId, call);
+            return;
+        }
+
+        var add = WriteBatchManager.AddAsync(shardId, call);
+        if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, call);
+    }
+
+    /// <summary>The (allocating) closure lives in its own method: the C# compiler would allocate it on every entry of the caller.</summary>
+    private void AddPlainWriteOrdered(Sessions sessions, long shardId, object call) =>
+        sessions.ExecuteOrdered(() => AddToWriteManager(shardId, call));
+
     /// <summary>Adds a call to the batcher of a shard without waiting for room: a failure to add fails the call.</summary>
     internal void AddToWriteManager(long shardId, object call)
     {
         var add = WriteBatchManager.AddAsync(shardId, call);
-        if (!add.IsCompletedSuccessfully) _ = ObserveAddAsync(add, call);
-    }
-
-    private static async Task ObserveAddAsync(ValueTask add, object call)
-    {
-        try
-        {
-            await add.ConfigureAwait(false);
-        }
-        catch (Exception e)
-        {
-            FailCall(call, e);
-        }
+        if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, call);
     }
 
     /// <summary>Go: `call.Callback(nil, err)` for any kind of call.</summary>
@@ -463,22 +475,8 @@ internal sealed class AsyncClientImpl : IAsyncClient
             return result;
         }
 
-        var add = WriteBatchManager.AddAsync(GetShardForKey(key, opts.PartitionKey), call);
-        if (add.IsCompletedSuccessfully) return result;
-        return PutAfterAddAsync(add, call, result);
-    }
-
-    private static async ValueTask<PutResult> PutAfterAddAsync(ValueTask add, PooledPutCall call, ValueTask<PutResult> result)
-    {
-        try
-        {
-            await add.ConfigureAwait(false);
-        }
-        catch (Exception e)
-        {
-            call.Complete(null, e);
-        }
-        return await result.ConfigureAwait(false);
+        AddPlainWrite(GetShardForKey(key, opts.PartitionKey), call);
+        return result;
     }
 
     public ValueTask<Exception?> DeleteAsync(string key, params ReadOnlySpan<DeleteOption> options)
@@ -494,22 +492,8 @@ internal sealed class AsyncClientImpl : IAsyncClient
         call.CallContext = opts.CallContext;
         var result = call.AsValueTask();
 
-        var add = WriteBatchManager.AddAsync(GetShardForKey(key, opts.PartitionKey), call);
-        if (add.IsCompletedSuccessfully) return result;
-        return DeleteAfterAddAsync(add, call, result);
-    }
-
-    private static async ValueTask<Exception?> DeleteAfterAddAsync(ValueTask add, PooledDeleteCall call, ValueTask<Exception?> result)
-    {
-        try
-        {
-            await add.ConfigureAwait(false);
-        }
-        catch (Exception e)
-        {
-            call.Complete(null, e);
-        }
-        return await result.ConfigureAwait(false);
+        AddPlainWrite(GetShardForKey(key, opts.PartitionKey), call);
+        return result;
     }
 
     public ValueTask<Exception?> DeleteRangeAsync(string minKeyInclusive, string maxKeyExclusive, params ReadOnlySpan<DeleteRangeOption> options)
@@ -566,21 +550,8 @@ internal sealed class AsyncClientImpl : IAsyncClient
         var result = call.AsValueTask();
 
         var add = ReadBatchManager.Get(GetShardForKey(key, opts.PartitionKey)).AddAsync(call);
-        if (add.IsCompletedSuccessfully) return result;
-        return GetAfterAddAsync(add, call, result);
-    }
-
-    private static async ValueTask<GetResult> GetAfterAddAsync(ValueTask add, PooledGetCall call, ValueTask<GetResult> result)
-    {
-        try
-        {
-            await add.ConfigureAwait(false);
-        }
-        catch (Exception e)
-        {
-            call.Complete(null, e);
-        }
-        return await result.ConfigureAwait(false);
+        if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, call);
+        return result;
     }
 
     /// <summary>Go: compareGetResponse.</summary>
@@ -655,7 +626,7 @@ internal sealed class AsyncClientImpl : IAsyncClient
                 SecondaryIndexName = options.SecondaryIndexName,
             };
             var add = ReadBatchManager.Get(shardId).AddAsync(call);
-            if (!add.IsCompletedSuccessfully) _ = ObserveAddAsync(add, call);
+            if (!add.IsCompletedSuccessfully) AddObserver.Observe(add, call);
         }
         return result;
     }

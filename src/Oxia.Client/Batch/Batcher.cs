@@ -10,23 +10,28 @@
 //              concurrently with it) is failed right away by wrapping it in a throwaway batch; a Barrier added to a closed
 //              batcher is completed (Done) right away.  Every call is completed or failed exactly once.
 //   Divergences (all behaviour-preserving, chosen for throughput / zero allocation per operation):
-//      * The queue is a bounded System.Threading.Channels channel (capacity = BatcherFactory.BatcherChannelBufferSize =
-//        Environment.ProcessorCount, Go: runtime.GOMAXPROCS) with SingleReader = true.  The fast path of AddAsync is a
-//        synchronous TryWrite and returns a default ValueTask (no allocation); a full queue parks the producer on a
-//        FIFO WriteAsync (back-pressure, like the blocking channel send of Go).
-//      * Go's `addMu` RWMutex + `closeC` + `addsDone` protocol is replaced by the channel completion: Dispose() calls
-//        Writer.TryComplete() (which atomically stops new writes and fails the producers parked on a full queue with
-//        ChannelClosedException -> they fail their call) and only THEN raises the `_closing` flag the loop polls.  So when
-//        the loop sees the flag (or sees the completed, empty channel) no call can be enqueued anymore and draining the
-//        queue is race free -- the same guarantee `<-b.addsDone` gives in Go.
-//      * The linger timer is ONE reusable System.Threading.Timer per batcher that is only a WAKE-UP HINT for an idle loop:
-//        the deadline of the open batch is a Stopwatch timestamp the loop compares with the clock itself, so a stale or
-//        early timer tick is harmless (it re-arms).  The timer is armed lazily -- only when the loop is idle with an open
+//      * The queue is a BatcherQueue (BatcherQueue.cs): a lock-free bounded MPSC ring (capacity = the factory's QueueCapacity; the client
+//        sizes it max(4096, MaxRequestsPerBatch), Go: runtime.GOMAXPROCS) with a single consumer, which replaced the bounded
+//        System.Threading.Channels channel of the first version.  The fast path of AddAsync is a CAS + an exchange and returns a default
+//        ValueTask (no allocation); a full queue parks the producer on a pooled IValueTaskSource, FIFO (back-pressure, like the blocking
+//        channel send of Go; new adds queue behind the parked ones, so one producer's calls stay in order).
+//      * Go's `addMu` RWMutex + `closeC` + `addsDone` protocol is replaced by the queue's close: Dispose() calls Complete() (which
+//        atomically stops new adds, fails the producers parked on a full queue through FailClosed -> their call fails with
+//        ErrShuttingDown, and wakes the loop) and only THEN raises the `_closing` flag the loop polls.  When the loop sees the flag (or
+//        a closed, drained queue) no call can be enqueued anymore and the drain (DequeueClosed, which waits for a producer between its
+//        reservation and its publication) is race free -- the same guarantee `<-b.addsDone` gives in Go.
+//      * The loop is started with the ExecutionContext flow suppressed: it lives as long as the batcher and must not inherit (and keep
+//        alive) the AsyncLocals / Activity.Current of the caller whose write created the batcher (a Go goroutine inherits nothing).
+//      * EXPERIMENT: `ExperimentalMaxInFlight` > 1 (default 1 = Go's one batch at a time) starts the next batch while earlier ones wait
+//        for their response.  A MEASUREMENT switch for docs/performance.md ("proposal: pipelined write batches"): it has no ordered retry.
+//      * The linger timer is ONE reusable LingerTimer (BatcherTimer.cs) per batcher that is only a WAKE-UP HINT for an idle
+//        loop: the deadline of the open batch is a Stopwatch timestamp the loop compares with the clock itself, so a stale
+//        or early timer tick is harmless (it re-arms).  The timer is armed lazily -- only when the loop is idle with an open
 //        batch and no earlier arming is still pending -- hence a loop that is saturated (batches complete by size) never
 //        touches the timer, and nothing is allocated per batch (no Task.Delay, no CancellationTokenSource, no exception).
-//        The tick is delivered by a sentinel object written with TryWrite (dropped when the queue is full: then the loop
-//        is not idle and checks the deadline on its own).  Timer granularity is 1 ms (Go: ns): a sub-millisecond linger
-//        rounds up to 1 ms.
+//        The tick wakes the loop through BatcherQueue.Tick (no item in the queue); an idle loop re-checks the deadline.  The wake-up service waits on a HIGH RESOLUTION timer on Windows
+//        (System.Threading.Timer has the 15.6 ms OS tick there: a 5 ms linger became ~15 ms, see BatcherTimer.cs), so a
+//        linger is honoured to ~0.5 ms (Go: ns) on every platform.
 //      * `select` between callC / timeout / closeC is a sequential check order (closing first, then queue, then deadline);
 //        Go's select picks randomly between ready cases, so any order is a legal Go schedule.
 //      * Batches may implement IRecyclableBatch: the loop gives them back once they were completed or failed.
@@ -37,7 +42,6 @@
 // =====================================================================================================================
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
-using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Oxia.Common.Logging;
 
@@ -53,16 +57,11 @@ internal interface IRecyclableBatch
 /// <summary>Go: batcherImpl.</summary>
 internal sealed class BatcherImpl : IBatcher
 {
-    /// <summary>Written to the queue by the linger timer to wake up an idle loop.</summary>
-    private static readonly object TimerTick = new();
-
     private readonly Func<IBatch> _batchFactory;
-    private readonly Channel<object> _callC;
-    private readonly ChannelReader<object> _reader;
-    private readonly ChannelWriter<object> _writer;
+    private readonly BatcherQueue _queue;
     private readonly long _lingerTicks;
     private readonly int _maxRequestsPerBatch;
-    private readonly Timer? _timer;
+    private readonly LingerTimer? _timer;
     private readonly ILogger _log;
 
     /// <summary>1 once Dispose() completed the channel (set AFTER TryComplete, see the header).</summary>
@@ -74,31 +73,24 @@ internal sealed class BatcherImpl : IBatcher
     private int _started;
     private readonly TaskCompletionSource _done = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    internal BatcherImpl(Func<IBatch> batchFactory, int queueCapacity, TimeSpan linger, int maxRequestsPerBatch)
+    internal BatcherImpl(Func<IBatch> batchFactory, int queueCapacity, TimeSpan linger, int maxRequestsPerBatch, int experimentalMaxInFlight = 1)
     {
+        ExperimentalMaxInFlight = Math.Max(1, experimentalMaxInFlight);
         _batchFactory = batchFactory;
         _maxRequestsPerBatch = maxRequestsPerBatch;
         QueueCapacity = Math.Max(1, queueCapacity);
-        _callC = Channel.CreateBounded<object>(new BoundedChannelOptions(QueueCapacity)
-        {
-            FullMode = BoundedChannelFullMode.Wait,
-            SingleReader = true,
-            SingleWriter = false,
-            AllowSynchronousContinuations = false,
-        });
-        _reader = _callC.Reader;
-        _writer = _callC.Writer;
         _log = OxiaLog.Create("batcher");
+        _queue = new BatcherQueue(QueueCapacity, FailClosed);
 
         if (linger > TimeSpan.Zero)
         {
             _lingerTicks = Math.Max(1, (long)(linger.TotalSeconds * Stopwatch.Frequency));
-            _timer = new Timer(static state => ((BatcherImpl)state!).OnTimer(), this, Timeout.Infinite, Timeout.Infinite);
+            _timer = new LingerTimer(static state => ((BatcherImpl)state!).OnTimer(), this);
         }
     }
 
     /// <summary>Go: len(callC) -- the calls waiting in the queue (tests).</summary>
-    internal int QueueCount => _reader.Count;
+    internal int QueueCount => _queue.Count;
 
     /// <summary>Go: cap(callC) (tests).</summary>
     internal int QueueCapacity { get; }
@@ -110,31 +102,23 @@ internal sealed class BatcherImpl : IBatcher
     /// <summary>Go: Add.  Completes when the call is queued (or failed because the batcher is closed).</summary>
     public ValueTask AddAsync(object call)
     {
-        if (_writer.TryWrite(call)) return default;
-
-        if (Volatile.Read(ref _closing) != 0)
+        switch (_queue.TryAdd(call, out var parked))
         {
-            // Closed: no exception on this path
-            FailCall(call, ClientErrors.ShuttingDown);
-            return default;
+            case AddStatus.Queued:
+                return default;
+            case AddStatus.Closed:
+                // Closed: no exception on this path
+                FailCall(call, ClientErrors.ShuttingDown);
+                return default;
+            default:
+                // The queue is full: the producer is parked, in FIFO order, until there is room (Go: the blocking send).  Close fails
+                // its call (FailClosed) and completes the wait.
+                return parked!.AsValueTask();
         }
-        return AddSlowAsync(call);
     }
 
-    /// <summary>The queue is full (or being closed): park, in FIFO order, until there is room (Go: the blocking send).</summary>
-    private async ValueTask AddSlowAsync(object call)
-    {
-        try
-        {
-            await _writer.WriteAsync(call).ConfigureAwait(false);
-            return;
-        }
-        catch (ChannelClosedException)
-        {
-            // Close wakes up the calls being added to a full queue
-        }
-        FailCall(call, ClientErrors.ShuttingDown);
-    }
+    /// <summary>Close failed a producer parked on the full queue: its call fails like any call added to a closed batcher.</summary>
+    private void FailClosed(object call) => FailCall(call, ClientErrors.ShuttingDown);
 
     /// <summary>Go: failCall.</summary>
     private void FailCall(object call, Exception err)
@@ -159,7 +143,7 @@ internal sealed class BatcherImpl : IBatcher
     public void Dispose()
     {
         // Atomically stops new calls and wakes up (fails) the producers parked on a full queue and the idle loop.
-        _writer.TryComplete();
+        _queue.Complete();
         // Only now the loop may drain: nothing can be enqueued anymore.
         Volatile.Write(ref _closing, 1);
     }
@@ -173,7 +157,12 @@ internal sealed class BatcherImpl : IBatcher
     {
         if (Interlocked.Exchange(ref _started, 1) == 0)
         {
-            _ = LoopAsync();
+            // The loop lives as long as the batcher: it must not inherit (and keep alive) the ambient context -- AsyncLocals,
+            // Activity.Current -- of the caller whose write happened to create the batcher.  A Go goroutine inherits nothing.
+            using (ExecutionContext.SuppressFlow())
+            {
+                _ = LoopAsync();
+            }
         }
         return _done.Task;
     }
@@ -190,7 +179,7 @@ internal sealed class BatcherImpl : IBatcher
         }
         finally
         {
-            _timer?.Dispose();
+            _timer?.Cancel();
             _done.TrySetResult();
         }
     }
@@ -199,13 +188,13 @@ internal sealed class BatcherImpl : IBatcher
     {
         IBatch? batch = null;
         long deadline = 0; // Stopwatch timestamp at which the open batch must be completed (linger > 0)
-        var reader = _reader;
+        var queue = _queue;
 
         while (true)
         {
             if (Volatile.Read(ref _closing) != 0) break;
 
-            if (!reader.TryRead(out var call))
+            if (!queue.TryDequeue(out var call))
             {
                 // Idle
                 if (batch is not null)
@@ -213,24 +202,15 @@ internal sealed class BatcherImpl : IBatcher
                     long remaining = deadline - Stopwatch.GetTimestamp();
                     if (remaining <= 0)
                     {
-                        await CompleteAsync(batch).ConfigureAwait(false);
+                        await CompleteOrPipelineAsync(batch).ConfigureAwait(false);
                         batch = null;
                         continue;
                     }
-                    ArmTimer(remaining);
+                    ArmTimer(deadline);
                 }
 
-                if (!await reader.WaitToReadAsync().ConfigureAwait(false)) break; // closed and empty
-                continue;
-            }
-
-            if (ReferenceEquals(call, TimerTick))
-            {
-                if (batch is not null && Stopwatch.GetTimestamp() >= deadline)
-                {
-                    await CompleteAsync(batch).ConfigureAwait(false);
-                    batch = null;
-                }
+                // A wake-up without a call (the linger timer, or a close) comes back through here: the checks above are the tick handler.
+                if (!await queue.WaitToReadAsync().ConfigureAwait(false)) break; // closed and empty
                 continue;
             }
 
@@ -240,9 +220,10 @@ internal sealed class BatcherImpl : IBatcher
                 {
                     if (batch is not null)
                     {
-                        await CompleteAsync(batch).ConfigureAwait(false);
+                        await CompleteOrPipelineAsync(batch).ConfigureAwait(false);
                         batch = null;
                     }
+                    if (_inFlight is { Count: > 0 }) await DrainInFlightAsync().ConfigureAwait(false);
                     barrier.Done();
                     continue;
                 }
@@ -254,14 +235,14 @@ internal sealed class BatcherImpl : IBatcher
 
                 if (!batch.CanAdd(call))
                 {
-                    await CompleteAsync(batch).ConfigureAwait(false);
+                    await CompleteOrPipelineAsync(batch).ConfigureAwait(false);
                     batch = NewBatch(out deadline);
                 }
 
                 batch.Add(call);
                 if (batch.Size == _maxRequestsPerBatch || _lingerTicks == 0)
                 {
-                    await CompleteAsync(batch).ConfigureAwait(false);
+                    await CompleteOrPipelineAsync(batch).ConfigureAwait(false);
                     batch = null;
                 }
             }
@@ -273,6 +254,7 @@ internal sealed class BatcherImpl : IBatcher
         }
 
         // Closed.
+        if (_inFlight is { Count: > 0 }) await DrainInFlightAsync().ConfigureAwait(false);
         if (batch is not null)
         {
             try
@@ -287,9 +269,8 @@ internal sealed class BatcherImpl : IBatcher
         }
 
         // Drain the queue: no call can be added to it anymore
-        while (reader.TryRead(out var call))
+        while (queue.DequeueClosed() is { } call)
         {
-            if (ReferenceEquals(call, TimerTick)) continue;
             try
             {
                 FailCall(call, ClientErrors.ShuttingDown);
@@ -306,6 +287,36 @@ internal sealed class BatcherImpl : IBatcher
         var batch = _batchFactory();
         deadline = _lingerTicks > 0 ? Stopwatch.GetTimestamp() + _lingerTicks : 0;
         return batch;
+    }
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // EXPERIMENT -- pipelining (NOT a feature: see docs/performance.md, "proposal: pipelined write batches")
+    // -----------------------------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// UNSAFE MEASUREMENT SWITCH, default 1 = the contract (one batch in flight per shard).  With K &gt; 1 the loop starts the next batch
+    /// while up to K-1 earlier ones wait for their responses.  It keeps the order in which batches are SENT but has no ordered retry: a failed
+    /// batch is retried independently of the ones behind it, which can reorder writes to a key.  It exists to quantify the potential of
+    /// pipelining (benchmarks only); nothing in the library sets it.
+    /// </summary>
+    internal int ExperimentalMaxInFlight { get; }
+
+    private Queue<Task>? _inFlight;
+
+    private ValueTask CompleteOrPipelineAsync(IBatch batch) =>
+        ExperimentalMaxInFlight <= 1 ? CompleteAsync(batch) : PipelineAsync(batch);
+
+    private async ValueTask PipelineAsync(IBatch batch)
+    {
+        var inFlight = _inFlight ??= new Queue<Task>();
+        while (inFlight.Count > 0 && inFlight.Peek().IsCompleted) _ = inFlight.Dequeue();
+        while (inFlight.Count >= ExperimentalMaxInFlight) await inFlight.Dequeue().ConfigureAwait(false);
+        inFlight.Enqueue(CompleteAsync(batch).AsTask());
+    }
+
+    private async ValueTask DrainInFlightAsync()
+    {
+        while (_inFlight is { Count: > 0 } inFlight) await inFlight.Dequeue().ConfigureAwait(false);
     }
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
@@ -339,19 +350,17 @@ internal sealed class BatcherImpl : IBatcher
     // Linger timer
     // -----------------------------------------------------------------------------------------------------------------
 
-    private void ArmTimer(long remainingTicks)
+    private void ArmTimer(long deadline)
     {
         // An earlier arming that is still outstanding fires no later than this one needs (deadlines only grow).
         if (_timer is null || Interlocked.CompareExchange(ref _timerPending, 1, 0) != 0) return;
 
-        long ms = (remainingTicks * 1000 + Stopwatch.Frequency - 1) / Stopwatch.Frequency; // round up
-        _timer.Change(Math.Clamp(ms, 1, uint.MaxValue - 1), Timeout.Infinite);
+        _timer.Arm(deadline);
     }
 
     private void OnTimer()
     {
         Volatile.Write(ref _timerPending, 0);
-        // Dropped when the queue is full (the loop is busy then) or closed
-        _writer.TryWrite(TimerTick);
+        _queue.Tick();
     }
 }
