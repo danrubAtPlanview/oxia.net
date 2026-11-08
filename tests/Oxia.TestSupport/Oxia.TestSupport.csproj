@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- Shared test infrastructure: in-process mock Oxia gRPC servers (Kestrel) and the reusable Docker Oxia fixture. -->
+  <!-- Shared test infrastructure: in-process mock Oxia gRPC servers (Kestrel), the reusable Docker Oxia server fixture and
+       small testify-like helpers (TestUtil). -->
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <RootNamespace>Oxia.TestSupport</RootNamespace>
@@ -7,7 +8,14 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="Grpc.AspNetCore" />
+    <!-- xUnit v3 building blocks for helpers (IAsyncLifetime fixtures, Assert.Fail/Skip).  The versions are pinned to the
+         one of the central `xunit.v3` meta package used by the test projects (see Directory.Packages.props). -->
+    <PackageReference Include="xunit.v3.extensibility.core" VersionOverride="3.2.2" />
+    <PackageReference Include="xunit.v3.assert" VersionOverride="3.2.2" />
     <ProjectReference Include="..\..\src\Oxia.Common\Oxia.Common.csproj" />
     <ProjectReference Include="..\..\src\Oxia.Client\Oxia.Client.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="scripts\**" />
   </ItemGroup>
 </Project>
