@@ -131,7 +131,10 @@ internal sealed class LingerTimerService
             _hrTimer = NativeTimer.TryCreate();
         }
         _thread = new Thread(Run) { IsBackground = true, Name = "oxia-linger-timer" };
-        _thread.Start();
+        using (ExecutionContext.SuppressFlow()) // the service outlives the batcher that happened to start it
+        {
+            _thread.Start();
+        }
     }
 
     private void Run()

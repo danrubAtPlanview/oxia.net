@@ -57,7 +57,7 @@ public class R1_HoldOrderTests
             Assert.Equal(expected.Count, applied.Count);
             Assert.True(expected.SequenceEqual(applied),
                 "writes of one caller were applied out of order, first mismatch at index " +
-                Enumerable.Range(0, expected.Count).First(i => expected[i] != applied[i]) +
+                Enumerable.Range(0, expected.Count).FirstOrDefault(i => expected[i] != applied[i]) +
                 ": expected " + string.Join(",", expected.Take(12)) + " ... got " + string.Join(",", applied.Take(12)) + " ...");
         }
         finally

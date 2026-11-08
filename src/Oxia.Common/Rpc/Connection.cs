@@ -214,7 +214,10 @@ internal sealed class Connection : IAsyncCloser
 
             var channel = GrpcChannel.ForAddress(channelAddress, options);
             var connection = new Connection(target, channel, onFailure, healthInterval, healthPingTimeout, log);
-            connection._healthLoop = Task.Run(connection.HealthCheckLoopAsync);
+            using (ExecutionContext.SuppressFlow()) // the loop lives as long as the pooled connection, not as long as the caller that dialled it
+            {
+                connection._healthLoop = Task.Run(connection.HealthCheckLoopAsync);
+            }
             return connection;
         }
         catch (Exception e)

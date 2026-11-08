@@ -174,7 +174,12 @@ internal sealed class BatcherImpl : IBatcher
     {
         if (Interlocked.Exchange(ref _started, 1) == 0)
         {
-            _ = LoopAsync();
+            // The loop lives as long as the batcher: it must not inherit (and keep alive) the ambient context -- AsyncLocals,
+            // Activity.Current -- of the caller whose write happened to create the batcher.  A Go goroutine inherits nothing.
+            using (ExecutionContext.SuppressFlow())
+            {
+                _ = LoopAsync();
+            }
         }
         return _done.Task;
     }
