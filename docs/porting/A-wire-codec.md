@@ -51,4 +51,29 @@ reused instance allocates nothing apart from strings and byte arrays.
 | `OxiaClientRpcTests.cs` | every rpc over a REAL gRPC channel (Kestrel h2c on loopback, mock service derived from `OxiaClient.OxiaClientBase`, `TestGrpcServer`): unary calls, all server-streaming calls, WriteStream ping-pong (200 rounds, headers), end of stream, 3 MB values, parallel reads, Oxia errors translated and the original `RpcException` / leader hint / status code still reachable, non-Oxia errors rethrown unchanged, token / `Dispose` cancellation (server observes it), `Context` cancelled when the stream ends |
 | `LoggingClientRpcTests.cs` | the 3 ported Go tests + extras over a fake `CallInvoker` |
 
-Benchmarks: `benchmarks/Oxia.Client.Benchmarks/Codec/CodecBenchmarks.cs` (hand codec vs Google.Protobuf; see the component report for numbers).
+## Benchmarks
+
+`benchmarks/Oxia.Client.Benchmarks/Codec/CodecBenchmarks.cs` (`WriteRequestEncodeBenchmarks`, `WriteResponseParseBenchmarks`,
+`GetResponseParseBenchmarks`; hand codec vs the protoc-generated Google.Protobuf classes).  The project's `Program.cs` must dispatch with
+`BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args)`; run
+`dotnet run -c Release --project benchmarks/Oxia.Client.Benchmarks -- --filter "*Oxia.Client.Benchmarks.Codec*" --job short`.
+
+Numbers of a `--job short` run (Intel Core Ultra 9 185H, .NET 10.0.14, shared noisy machine -- take ratios, not absolutes;
+Google = `WriteTo(IBufferWriter)` / `Parser.ParseFrom`, hand = `Write(IBufferWriter)` / `Parse` into a reused instance; allocation 0 B everywhere on the hand side except where noted):
+
+| Scenario | Google | Hand | Ratio |
+|---|---|---|---|
+| WriteRequest encode, 1 put (key 28 chars, 100 B value) | 84 ns | 60 ns | 0.72 |
+| WriteRequest encode, 100 puts | 6.15 us | 4.14 us | 0.67 |
+| WriteRequest encode, 1000 puts | 65.8 us | 34.1 us | 0.52 |
+| WriteResponse parse, 1 put response | 169 ns, 528 B | 33 ns, 0 B | 0.20 |
+| WriteResponse parse, 100 put responses | 4.75 us, 15.2 KB | 2.59 us, 0 B | 0.55 |
+| WriteResponse parse, 1000 put responses | 70.0 us, 144.8 KB | 36.6 us, 0 B | 0.52 |
+| same, 1000 puts, input split in 4 KiB segments | 72.6 us, 144.7 KB | 38.1 us, 0 B | 0.55 |
+| same, 1000 puts, hand into a NEW message (what the gRPC deserializer does) | 70.0 us, 144.8 KB | 49.7 us, 144.8 KB | 0.71 |
+| GetResponse parse (version + 100 B value) | 139 ns, 472 B | 47-57 ns, 128 B (the value array only) | 0.34-0.41 |
+| ReadResponse parse, 100 get responses (100 B values) | 9.95 us, 32.7 KB | 7.37 us, 12.8 KB (the value arrays only) | 0.74 |
+
+Where the time goes (1000 puts): `Size()` 8.8 us hand vs 13.4 us Google (`CalculateSize`), the rest is the write pass; the ASCII fast path
+(`Ascii.IsValid` 1 ns instead of `GetByteCount` 7 ns; vector narrowing instead of `Encoding.UTF8.GetBytes` 11 ns) and the reserved-block writer
+(local position instead of ref-struct field traffic, one capacity check per put) took the encode from 0.9-1.07x to 0.52x of Google.

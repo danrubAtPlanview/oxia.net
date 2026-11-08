@@ -1,6 +1,8 @@
 // =====================================================================================================================
 // PORT NOTE
 //   Upstream : common/proto/client_grpc.pb.go  (OxiaClient_ServiceDesc, OxiaClient_*_FullMethodName, the streaming flags)
+//              common/proto/proto_grpc.go      (the vtproto CodecV2: Marshal = SizeVT + MarshalToSizedBufferVT into the
+//                                               transport buffer, Unmarshal = UnmarshalVT from the received buffer)
 //   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
 //   Intent   : The Grpc.Core.Method<TRequest,TResponse> descriptors of the OxiaClient service, with Marshaller<T>s built on the
 //              hand-written codecs (Oxia.Common.Proto.Codec): the serializer sets the payload length, encodes straight into the
