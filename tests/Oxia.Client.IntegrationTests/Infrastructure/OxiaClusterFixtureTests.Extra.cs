@@ -23,6 +23,7 @@ public static class ClusterGate
     public static bool Enabled => OxiaClusterFixture.Enabled;
 }
 
+[Collection("oxia-cluster")]
 public class OxiaClusterFixtureTests(OxiaClusterFixture clusters)
 {
     [Fact(Skip = ClusterGate.Reason, SkipUnless = nameof(ClusterGate.Enabled), SkipType = typeof(ClusterGate))]
