@@ -156,6 +156,14 @@ internal sealed class Connection : IAsyncCloser
                 MaxReceiveMessageSize = Constants.MaxGrpcFrameSize,
             };
 
+            // The transport credentials.  For http(s) addresses the channel reads them from the scheme; with a resolver scheme
+            // (`custom:///x`) it cannot, and refuses to be created unless the credentials are given.
+            var transportCredentials = useTls ? ChannelCredentials.SecureSsl : ChannelCredentials.Insecure;
+            if (!httpAddress)
+            {
+                options.Credentials = transportCredentials;
+            }
+
             if (authentication is not null)
             {
                 if (authentication.RequireTransportSecurity && !useTls)
@@ -171,10 +179,21 @@ internal sealed class Connection : IAsyncCloser
                         metadata.Add(key.ToLowerInvariant(), value);
                     }
                 });
-                options.Credentials = ChannelCredentials.Create(useTls ? ChannelCredentials.SecureSsl : ChannelCredentials.Insecure, callCredentials);
+                options.Credentials = ChannelCredentials.Create(transportCredentials, callCredentials);
                 if (!useTls)
                 {
                     options.UnsafeUseInsecureChannelCallCredentials = true;
+                }
+            }
+
+            if (!httpAddress)
+            {
+                // grpc-go sends the endpoint of `scheme:///endpoint` as :authority while it connects to the addresses the resolver
+                // returns; the balancer would send the resolved address instead
+                var endpoint = EndpointOf(channelAddress);
+                if (endpoint.Length > 0)
+                {
+                    options.HttpHandler = new AuthorityHandler(endpoint) { InnerHandler = handler };
                 }
             }
 
@@ -185,8 +204,8 @@ internal sealed class Connection : IAsyncCloser
 
             if (options.Credentials is null && !httpAddress)
             {
-                // The channel cannot tell from the scheme whether the transport is secure when a resolver is used
-                options.Credentials = useTls ? ChannelCredentials.SecureSsl : ChannelCredentials.Insecure;
+                // a dial option cleared them
+                options.Credentials = transportCredentials;
             }
 
             var channel = GrpcChannel.ForAddress(channelAddress, options);
@@ -198,6 +217,31 @@ internal sealed class Connection : IAsyncCloser
         {
             handler.Dispose();
             throw OxiaErrors.Wrap(e, $"error connecting to {target}");
+        }
+    }
+
+    /// <summary>
+    /// The endpoint of a resolver target, grpc-go's <c>Target.Endpoint()</c>: the path of <c>scheme:///endpoint</c> without the leading
+    /// slash (<c>dns:///host:6648</c> -> <c>host:6648</c>); the authority part when there is no path.
+    /// </summary>
+    internal static string EndpointOf(string address)
+    {
+        if (!Uri.TryCreate(address, UriKind.Absolute, out var uri))
+        {
+            return string.Empty;
+        }
+
+        var path = uri.AbsolutePath.TrimStart('/');
+        return path.Length > 0 ? Uri.UnescapeDataString(path) : uri.Authority;
+    }
+
+    /// <summary>Sets the HTTP/2 :authority (Host header) of every request, whatever address the channel connected to.</summary>
+    private sealed class AuthorityHandler(string authority) : DelegatingHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            request.Headers.Host = authority;
+            return base.SendAsync(request, cancellationToken);
         }
     }
 

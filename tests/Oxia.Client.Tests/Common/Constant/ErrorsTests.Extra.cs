@@ -223,6 +223,44 @@ public class ErrorsExtraTests
     }
 
     [Fact]
+    public void FromGrpcError_RecoversTheLeaderHintFromAnRpcExceptionKeptAsInnerException()
+    {
+        // OxiaClientRpc throws translated exceptions that keep the original RpcException as their inner exception
+        var rpc = OxiaErrors.IntoGrpcStatusError(OxiaErrors.NodeIsNotLeader,
+            OxiaErrors.WithLeaderHint(4, "node-4:6648"), OxiaErrors.WithCoordinatorLeaderHint("coord:6651"))!;
+        Exception[] wrapped =
+        [
+            new OxiaException("translated", rpc),
+            new OxiaException("outer", new InvalidOperationException("middle", rpc)),
+            new AggregateException(new Exception("unrelated"), new OxiaException("translated", rpc)),
+            new IOException("io", new OxiaException("translated", rpc)),
+        ];
+
+        foreach (var err in wrapped)
+        {
+            var (translated, metadata) = OxiaErrors.FromGrpcError(err);
+            Assert.True(OxiaErrors.Is(translated, OxiaErrors.NodeIsNotLeader));
+            Assert.NotNull(metadata);
+            Assert.True(metadata.TryGetLeaderHint(out var shard, out var leader));
+            Assert.Equal(4L, shard);
+            Assert.Equal("node-4:6648", leader);
+            Assert.True(metadata.TryGetCoordinatorLeaderHint(out var coordinator));
+            Assert.Equal("coord:6651", coordinator);
+            Assert.Equal(StatusCode.Aborted, OxiaErrors.GrpcCode(err));
+        }
+    }
+
+    [Fact]
+    public void FromGrpcError_OfAWrappedRpcExceptionWithoutDetailsReturnsTheWrapper()
+    {
+        var wrapper = new OxiaException("translated", new RpcException(new Status(StatusCode.Unavailable, "down")));
+        var (err, md) = OxiaErrors.FromGrpcError(wrapper);
+        Assert.Same(wrapper, err);
+        Assert.Null(md);
+        Assert.Equal(StatusCode.Unavailable, OxiaErrors.GrpcCode(wrapper));
+    }
+
+    [Fact]
     public void IntoGrpcStatusError_WrappedSentinelKeepsTheWrapperMessage()
     {
         var wrapped = OxiaErrors.Wrap(OxiaErrors.SessionNotFound, "while renewing");

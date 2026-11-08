@@ -244,13 +244,13 @@ public sealed class TlsOptions
         {
             options.RemoteCertificateValidationCallback = static (_, _, _, _) => true;
         }
-        else if (rootCas is not null)
+        else if (rootCas is not null || options.TargetHost is not null)
         {
+            // SocketsHttpHandler verifies the host name against the host it dials, ignoring TargetHost: verify the configured server
+            // name (Go's tls.Config.ServerName) here, with the chain checked against the configured roots (or the system's)
+            var serverName = options.TargetHost;
             options.RemoteCertificateValidationCallback = (_, certificate, chain, errors) =>
-                // the host name is still verified; the chain is checked against the configured roots, not the system's
-                (errors & SslPolicyErrors.RemoteCertificateNameMismatch) == 0 &&
-                (errors & SslPolicyErrors.RemoteCertificateNotAvailable) == 0 &&
-                ChainsToRoots(certificate, chain, rootCas, serverAuth: true);
+                ValidateServerCertificate(certificate, chain, errors, rootCas, serverName);
         }
 
         // The client certificate is optional: only a server that requires client authentication asks for one.
@@ -325,6 +325,33 @@ public sealed class TlsOptions
         }
 
         return new ServerTlsConfig(options, authType, clientCas);
+    }
+
+    /// <summary>x509 verification of a server certificate: the chain against <paramref name="roots"/> (the system roots when null) and the host name.</summary>
+    internal static bool ValidateServerCertificate(X509Certificate? certificate, X509Chain? chain, SslPolicyErrors errors,
+        X509Certificate2Collection? roots, string? serverName)
+    {
+        if (certificate is null || (errors & SslPolicyErrors.RemoteCertificateNotAvailable) != 0)
+        {
+            return false;
+        }
+
+        if (roots is null)
+        {
+            if ((errors & SslPolicyErrors.RemoteCertificateChainErrors) != 0) return false;
+        }
+        else if (!ChainsToRoots(certificate, chain, roots, serverAuth: true))
+        {
+            return false;
+        }
+
+        if (serverName is null)
+        {
+            return (errors & SslPolicyErrors.RemoteCertificateNameMismatch) == 0;
+        }
+
+        using var leaf = new X509Certificate2(certificate);
+        return leaf.MatchesHostname(serverName);
     }
 
     private static CipherSuitesPolicy? ToPolicy(ushort[]? cipherSuites)

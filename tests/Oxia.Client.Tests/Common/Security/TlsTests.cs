@@ -74,12 +74,22 @@ internal sealed class CapturingLogger : ILogger
 public class TlsTests
 {
     internal static (string CertPem, string KeyPem) GenerateSelfSignedCert(string cn, params string[] dnsNames)
+        => GenerateSelfSignedCert(cn, false, dnsNames);
+
+    /// <summary>The Go helper (self-signed, IsCA, cert/CRL signing), optionally with serverAuth + clientAuth extended key usages and DNS SANs.</summary>
+    internal static (string CertPem, string KeyPem) GenerateSelfSignedCert(string cn, bool extendedKeyUsages, params string[] dnsNames)
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var request = new CertificateRequest($"CN={cn}", key, HashAlgorithmName.SHA256);
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
         request.CertificateExtensions.Add(new X509KeyUsageExtension(
             X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign | X509KeyUsageFlags.DigitalSignature, true));
+        if (extendedKeyUsages)
+        {
+            request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
+                [new Oid("1.3.6.1.5.5.7.3.1"), new Oid("1.3.6.1.5.5.7.3.2")], false));
+        }
+
         if (dnsNames.Length > 0)
         {
             var san = new SubjectAlternativeNameBuilder();
