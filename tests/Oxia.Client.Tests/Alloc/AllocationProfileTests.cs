@@ -68,20 +68,19 @@ public class AllocationProfileTests(ITestOutputHelper output)
         Environment.GetEnvironmentVariable("OXIA_Z1_PROFILE") == "1";
 #endif
 
-    private async Task Profile(string name, Func<Task<int>> round)
+    private async Task Profile(string name, Func<int, Task<long>> rounds)
     {
-        for (int i = 0; i < 400; i++) await round();
+        await rounds(400);
         for (int pause = 0; pause < 4; pause++)
         {
-            for (int i = 0; i < 300; i++) await round();
+            await rounds(300);
             await Task.Delay(120);
         }
 
         using var listener = new TickListener();
         GC.Collect();
         listener.Start();
-        long ops = 0;
-        while (ops < 400_000) ops += await round();
+        long ops = await rounds(30_000);
         listener.Stop();
         output.WriteLine($"== {name}: {listener.Report(ops)}");
     }
@@ -94,11 +93,15 @@ public class AllocationProfileTests(ITestOutputHelper output)
         var wire = new FakeWireClient(window);
         wire.Invoker.GetsNotFound = true;
         var tasks = new ValueTask<GetResult>[window];
-        await Profile("get (not found)", async () =>
+        var keys = Enumerable.Range(0, window).Select(i => "/bench/key-" + i).ToArray();
+        await Profile("get (not found)", async rounds =>
         {
-            for (int i = 0; i < window; i++) tasks[i] = wire.Client.GetAsync("/bench/key-" + i);
-            for (int i = 0; i < window; i++) await tasks[i];
-            return window;
+            for (int r = 0; r < rounds; r++)
+            {
+                for (int i = 0; i < window; i++) tasks[i] = wire.Client.GetAsync(keys[i]);
+                for (int i = 0; i < window; i++) await tasks[i];
+            }
+            return (long)rounds * window;
         });
         await wire.CloseAsync();
     }
@@ -110,12 +113,36 @@ public class AllocationProfileTests(ITestOutputHelper output)
         var wire = new FakeWireClient(12);
         var notifications = await NotificationsImpl.CreateAsync(wire.Client.Ctx, wire.Client.Options, wire.Provider, wire.ShardManager);
         var reader = notifications.Ch;
-        await Profile("notification delivery", async () =>
+        await Profile("notification delivery", async rounds =>
         {
-            for (int n = 0; n < 200; n++) await reader.ReadAsync();
-            return 200;
+            for (int r = 0; r < rounds; r++)
+            {
+                for (int n = 0; n < 200; n++) await reader.ReadAsync();
+            }
+            return (long)rounds * 200;
         });
         await notifications.CloseAsync();
+        await wire.CloseAsync();
+    }
+
+    [Fact]
+    public async Task ProfileDeletes()
+    {
+        if (!Enabled) return;
+        const int window = 12;
+        var wire = new FakeWireClient(window, intercepted: true);
+        var keys = Enumerable.Range(0, window).Select(i => "/bench/key-" + i).ToArray();
+        var tasks = new ValueTask<Exception?>[window];
+        async Task<long> Rounds(int rounds)
+        {
+            for (int r = 0; r < rounds; r++)
+            {
+                for (int i = 0; i < window; i++) tasks[i] = wire.Client.DeleteAsync(keys[i]);
+                for (int i = 0; i < window; i++) await tasks[i];
+            }
+            return (long)rounds * window;
+        }
+        await Profile("delete", Rounds);
         await wire.CloseAsync();
     }
 
@@ -127,11 +154,15 @@ public class AllocationProfileTests(ITestOutputHelper output)
         var wire = new FakeWireClient(window, intercepted: true);
         var tasks = new ValueTask<PutResult>[window];
         var value = new byte[100];
-        await Profile("put", async () =>
+        var keys = Enumerable.Range(0, window).Select(i => "/bench/key-" + i).ToArray();
+        await Profile("put", async rounds =>
         {
-            for (int i = 0; i < window; i++) tasks[i] = wire.Client.PutAsync("/bench/key-" + i, value);
-            for (int i = 0; i < window; i++) await tasks[i];
-            return window;
+            for (int r = 0; r < rounds; r++)
+            {
+                for (int i = 0; i < window; i++) tasks[i] = wire.Client.PutAsync(keys[i], value);
+                for (int i = 0; i < window; i++) await tasks[i];
+            }
+            return (long)rounds * window;
         });
         await wire.CloseAsync();
     }

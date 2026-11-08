@@ -42,6 +42,29 @@ internal sealed class FakeWireInvoker : CallInvoker
     private byte[][]? _scanResponses;
     private byte[][]? _notificationBatches;
 
+    private long _pendingReads;
+
+    private static readonly long PendingReadBytes = MeasurePendingReadBytes();
+
+    private static long MeasurePendingReadBytes()
+    {
+        long size = 0;
+        for (int i = 0; i < 3; i++) // the first round also pays for the JIT / the type loading
+        {
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            var task = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously).Task;
+            size = GC.GetAllocatedBytesForCurrentThread() - before;
+            GC.KeepAlive(task);
+        }
+        return size;
+    }
+
+    /// <summary>
+    /// Bytes the FAKE itself allocated (the Task + TaskCompletionSource of every write-stream read that had to wait, as the real transport
+    /// also allocates its own there): the tests subtract it, so the budgets are those of the code under test.
+    /// </summary>
+    public long FakeAllocatedBytes => Interlocked.Read(ref _pendingReads) * PendingReadBytes;
+
     /// <summary>Reads answer KeyNotFound (set before the first read: the canned responses are built once per size).</summary>
     public bool GetsNotFound { get; set; }
 
@@ -274,6 +297,7 @@ internal sealed class FakeWireInvoker : CallInvoker
                     return True;
                 }
                 if (_completed) return False;
+                Interlocked.Increment(ref owner._pendingReads);
                 return (_waiter = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
             }
         }
