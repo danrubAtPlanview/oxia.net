@@ -172,7 +172,23 @@ public ref struct ProtoReader
 
     // ---- varints ---------------------------------------------------------------------------------------------------
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ulong ReadVarint64()
+    {
+        int pos = _pos;
+        if (pos < _limitInSpan)
+        {
+            ulong b = _span[pos];
+            if (b < 0x80)
+            {
+                _pos = pos + 1;
+                return b;
+            }
+        }
+        return ReadVarint64Multi();
+    }
+
+    private ulong ReadVarint64Multi()
     {
         int pos = _pos;
         if (_span.Length - pos >= 10)
@@ -214,28 +230,44 @@ public ref struct ProtoReader
         return 0;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public long ReadInt64() => (long)ReadVarint64();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public uint ReadUInt32() => (uint)ReadVarint64();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int ReadInt32() => (int)ReadVarint64();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool ReadBool() => ReadVarint64() != 0;
 
     /// <summary>Reads a length prefix and validates it against the bytes left in the current message.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int ReadLength()
     {
         ulong v = ReadVarint64();
+        if (v <= (ulong)(_limitInSpan - _pos)) return (int)v;   // inside the current segment and the current message
+        return ReadLengthSlow(v);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int ReadLengthSlow(ulong v)
+    {
         if (v > int.MaxValue || (long)v > Remaining) ThrowNegativeLength();
         return (int)v;
     }
 
     // ---- fixed width -----------------------------------------------------------------------------------------------
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public uint ReadFixed32()
     {
         if (_limitInSpan - _pos >= 4)
         {
-            uint v = BinaryPrimitives.ReadUInt32LittleEndian(_span.Slice(_pos));
+            uint v = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref MemoryMarshal.GetReference(_span), _pos));
             _pos += 4;
-            return v;
+            return BitConverter.IsLittleEndian ? v : BinaryPrimitives.ReverseEndianness(v);
         }
         return ReadFixed32Slow();
     }
@@ -248,13 +280,14 @@ public ref struct ProtoReader
         return v;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ulong ReadFixed64()
     {
         if (_limitInSpan - _pos >= 8)
         {
-            ulong v = BinaryPrimitives.ReadUInt64LittleEndian(_span.Slice(_pos));
+            ulong v = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref MemoryMarshal.GetReference(_span), _pos));
             _pos += 8;
-            return v;
+            return BitConverter.IsLittleEndian ? v : BinaryPrimitives.ReverseEndianness(v);
         }
         return ReadFixed64Slow();
     }

@@ -32,7 +32,7 @@ public class CodecDifferentialTests
     [Fact]
     public void AllMessagesOfClientProtoAreRegistered()
     {
-        // 34 message types (the 5 enums need no codec); a new message in client.proto must be added to ClientMessages.cs, the codecs and MessageKinds.
+        // 35 message types (the 5 enums need no codec); a new message in client.proto must be added to ClientMessages.cs, the codecs and MessageKinds.
         var oracleMessages = typeof(Io.Oxia.Proto.V1.PutRequest).Assembly.GetTypes()
             .Where(t => t.Namespace == "Io.Oxia.Proto.V1" && typeof(Google.Protobuf.IMessage).IsAssignableFrom(t))
             .Select(t => t.Name)
