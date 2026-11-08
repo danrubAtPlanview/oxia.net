@@ -49,6 +49,9 @@ internal sealed class Connection : IAsyncCloser
     internal static readonly TimeSpan DefaultGrpcClientKeepAliveTimeout = TimeSpan.FromSeconds(3);
     internal const bool DefaultGrpcClientPermitWithoutStream = true;
 
+    /// <summary>grpc-go's <c>MinConnectTimeout</c>: how long a single connection attempt may take.</summary>
+    internal static readonly TimeSpan DefaultConnectTimeout = TimeSpan.FromSeconds(20);
+
     // Cadence and per-ping timeout of the application-level connection health loop. The ping timeout is deliberately generous: it
     // shares the connection with the data traffic, so on a saturated server a slow ping does not mean the connection is dead.
     internal static readonly TimeSpan DefaultConnectionHealthInterval = TimeSpan.FromSeconds(10);
@@ -142,6 +145,7 @@ internal sealed class Connection : IAsyncCloser
             KeepAlivePingTimeout = DefaultGrpcClientKeepAliveTimeout,
             KeepAlivePingPolicy = DefaultGrpcClientPermitWithoutStream ? HttpKeepAlivePingPolicy.Always : HttpKeepAlivePingPolicy.WithActiveRequests,
             EnableMultipleHttp2Connections = true,
+            ConnectTimeout = DefaultConnectTimeout, // grpc-go's minimum connect timeout
         };
         if (useTls)
         {
