@@ -51,11 +51,14 @@ public class ConnectionTests
         }
     }
 
-    private static async Task<bool> CheckTestConnection(Connection conn)
+    // `deadline` defaults to 100 ms for the polling callers (Eventually retries).  A caller that fires the call ONCE to trigger a dial
+    // (Go: conn.Connect(), which has no deadline) passes a generous one: with a 100 ms deadline a busy process can cancel the request
+    // before the connection attempt even starts, and then the dialer is never invoked.
+    private static async Task<bool> CheckTestConnection(Connection conn, TimeSpan? deadline = null)
     {
         try
         {
-            await conn.HealthClient.CheckAsync(new HealthCheckRequest(), deadline: DateTime.UtcNow.AddMilliseconds(100));
+            await conn.HealthClient.CheckAsync(new HealthCheckRequest(), deadline: DateTime.UtcNow + (deadline ?? TimeSpan.FromMilliseconds(100)));
             return true;
         }
         catch (Exception)
@@ -111,7 +114,7 @@ public class ConnectionTests
 
         await using var conn = Connection.CreateWithHealthConfig("tls://oxia.test:6649", null, null, [dialer], _ => { },
             TimeSpan.FromHours(1), TimeSpan.FromSeconds(1));
-        _ = CheckTestConnection(conn); // triggers the connection attempt (Go: conn.Connect())
+        _ = CheckTestConnection(conn, TimeSpan.FromSeconds(30)); // triggers the connection attempt (Go: conn.Connect(), no deadline)
 
         var target = await dialed.Task.WaitAsync(TimeSpan.FromSeconds(5)); // "the name of the target was never dialed"
         Assert.Equal("oxia.test:6649", target);
