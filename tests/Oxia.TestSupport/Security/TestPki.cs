@@ -155,13 +155,23 @@ public sealed class TestPki : IDisposable
 
     /// <summary>
     /// TLS options for the fixture's own raw gRPC probes (readiness, leader lookup): trust the CA, verify the host name, no client
-    /// certificate.  Deliberately independent of <c>Oxia.Common.Security.TlsOptions</c>, which is part of what the tests exercise.
+    /// certificate unless <paramref name="presentClientCertificate"/> (servers that require client authentication).  Deliberately
+    /// independent of <c>Oxia.Common.Security.TlsOptions</c>, which is part of what the tests exercise.
     /// </summary>
-    public SslClientAuthenticationOptions RawClientSslOptions()
+    public SslClientAuthenticationOptions RawClientSslOptions(bool presentClientCertificate = false)
     {
         var root = X509CertificateLoader.LoadCertificate(_ca.RawData);
+        X509CertificateCollection? clientCertificates = null;
+        if (presentClientCertificate)
+        {
+            using var pem = X509Certificate2.CreateFromPem(Client.CertificatePem, Client.PrivateKeyPem);
+            // an ephemeral key cannot be used by SChannel for client authentication: round-trip it through PKCS#12
+            clientCertificates = [X509CertificateLoader.LoadPkcs12(pem.Export(X509ContentType.Pkcs12), null)];
+        }
+
         return new SslClientAuthenticationOptions
         {
+            ClientCertificates = clientCertificates,
             EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
             RemoteCertificateValidationCallback = (_, certificate, _, _) =>
             {

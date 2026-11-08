@@ -68,7 +68,9 @@ internal static class SecurityHelpers
     /// TLS disabled) and a coordinator whose RPC provider uses the peer certificate as client configuration (<c>nil</c> when only the
     /// public endpoint is secured).
     /// </summary>
-    public static async Task<OxiaCluster> NewTlsCluster(OxiaClusterFixture clusters, PkiFixture pki, bool onlyPublicTls = false)
+    public static async Task<OxiaCluster> NewTlsCluster(OxiaClusterFixture clusters, PkiFixture pki, bool onlyPublicTls = false,
+        IReadOnlyList<string>? extraServerArgs = null, bool probeWithClientCertificate = false, string? oidcProviderParams = null,
+        string? oidcReadinessToken = null)
     {
         var dir = OxiaClusterProfile.DirToken;
         string[] publicTls =
@@ -91,10 +93,19 @@ internal static class SecurityHelpers
         {
             Files = pki.Pki.PeerFiles(),
             // the Go option struct `*option` (peer certificate + CA) is used for Server.Public, Server.Internal and Replication
-            ServerArgs = onlyPublicTls ? publicTls : [.. publicTls, .. internalTls, .. replicationTls],
+            ServerArgs =
+            [
+                .. onlyPublicTls ? publicTls : [.. publicTls, .. internalTls, .. replicationTls],
+                .. extraServerArgs ?? [],
+                .. oidcProviderParams is null ? (string[])[] : ["--auth-provider-name", "oidc", "--auth-provider-params", oidcProviderParams],
+            ],
             // rpc2.NewControllerRPCProviderFactory(tlsConf): the coordinator dials the data servers' internal endpoint with it
             CoordinatorArgs = onlyPublicTls ? [] : replicationTls,
-            Probe = new RawSecurity { Tls = pki.Pki.RawClientSslOptions() },
+            Probe = new RawSecurity
+            {
+                Tls = pki.Pki.RawClientSslOptions(probeWithClientCertificate),
+                Token = oidcReadinessToken is null ? null : () => oidcReadinessToken,
+            },
         };
         return await StartCluster(clusters, "tls", profile);
     }
