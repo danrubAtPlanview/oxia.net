@@ -260,7 +260,7 @@ public class AllocationTests(ITestOutputHelper output)
     public async Task EndToEnd_LockStepPingPongThroughTheBatcherLoop_StaysWithinAByteBudget()
     {
         RequireOptimizedBuild();
-        var factory = new Internal.Batch.BatcherFactory(SyncExecutor(), "default", TimeSpan.Zero, 100, new OxiaMetrics(null),
+        var factory = new Oxia.Client.Internal.Batch.BatcherFactory(SyncExecutor(), "default", TimeSpan.Zero, 100, new OxiaMetrics(null),
             TimeSpan.FromSeconds(30));
         var batcher = factory.NewWriteBatcher(CancellationToken.None, 1, 1 << 20);
         var call = new PooledPut { Key = "key", Value = new byte[16] };
