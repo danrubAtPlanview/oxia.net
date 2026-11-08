@@ -192,25 +192,31 @@ public class GateAndOptionsTests
         await Task.CompletedTask;
         return; // allocation figures are meaningless in Debug
 #else
+        await Task.CompletedTask;
         var queue = new BatcherQueue(1, static _ => { });
-        async Task Round()
+
+        // The loop itself must not allocate, or the figure measures the test: no `async` local (a state machine per round), no
+        // Assert.Equal on an enum (boxing), no await (the continuation would hop pool threads).  The parked producer is woken on the
+        // pool as an IThreadPoolWorkItem; we wait for it by polling the pooled ValueTask.
+        static void Round(BatcherQueue queue)
         {
-            Assert.Equal(AddStatus.Queued, queue.TryAdd("a", out _));
-            Assert.Equal(AddStatus.Parked, queue.TryAdd("b", out var parked));
-            Assert.True(queue.TryDequeue(out _)); // frees the room: "b" is moved in and its producer is woken on the pool
-            await parked!.AsValueTask();
-            Assert.True(queue.TryDequeue(out _));
+            if (queue.TryAdd("a", out _) != AddStatus.Queued) throw new InvalidOperationException("expected Queued");
+            if (queue.TryAdd("b", out var parked) != AddStatus.Parked) throw new InvalidOperationException("expected Parked");
+            if (!queue.TryDequeue(out _)) throw new InvalidOperationException("expected an item"); // frees the room: "b" is moved in and its producer woken
+            var awaiter = parked!.AsValueTask().GetAwaiter();
+            var spin = new SpinWait();
+            while (!awaiter.IsCompleted) spin.SpinOnce();
+            awaiter.GetResult();
+            if (!queue.TryDequeue(out _)) throw new InvalidOperationException("expected the parked item");
         }
 
-        for (int i = 0; i < 2000; i++) await Round(); // warm up: pools, thread pool queues, JIT
+        for (int i = 0; i < 2000; i++) Round(queue); // warm up: pools, thread pool queues, JIT
         long best = long.MaxValue;
         for (int attempt = 0; attempt < 8; attempt++)
         {
-            // Process-wide counter: the continuation after `await parked` runs on arbitrary pool threads, so a per-thread counter sampled
-            // before and after the loop could belong to two different threads (a meaningless difference).  The class runs in the serial
-            // "Allocations" collection, so nothing else allocates meanwhile.
+            // Process-wide counter (the wake-up runs on pool threads); the class is in the serial "Allocations" collection.
             long before = GC.GetTotalAllocatedBytes(precise: true);
-            for (int i = 0; i < 1000; i++) await Round();
+            for (int i = 0; i < 1000; i++) Round(queue);
             long bytes = GC.GetTotalAllocatedBytes(precise: true) - before;
             best = Math.Min(best, bytes);
         }
