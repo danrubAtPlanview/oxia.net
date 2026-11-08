@@ -5,10 +5,12 @@
 //   Pinned at: 8456f61e1ada7b786f5ef17798b45fbc17d0d246
 //   Intent   : Allocation budget of the HOT PATH of the async client: PutAsync / GetAsync / DeleteAsync must allocate
 //              nothing per operation in steady state on the client side (pooled calls, stack-resolved options, no closures).
-//              The numbers below include the work of the whole pipeline in this process (batcher, codec, gRPC client AND the
-//              Kestrel mock server), so read them as an upper bound; the per-operation columns that matter are
-//              "Allocated" of the *Pipelined* benchmarks (amortised over 1000 operations of one batch) and of the
-//              Single* ones (one operation per round trip: includes per-request gRPC overhead).
+//              The numbers include the work of the whole pipeline of this process (batcher, codec, gRPC client AND the Kestrel
+//              mock server, whose protobuf parsing of the requests allocates a message object + strings per operation), so
+//              read them as an upper bound of the client; the server answers with cached responses to keep its share small.
+//              The client's own share is asserted by AsyncClientImpl.Extra.cs (0 B/op with a batcher that completes inline).
+//              "Allocated" of the *Pipelined* benchmarks is amortised over the 1000 operations of one batch; the Single*
+//              ones use one operation per round trip (BatchLinger 0), so they include the per-request gRPC overhead.
 //   Run      : dotnet run -c Release --project benchmarks/Oxia.Client.Benchmarks -- --filter "*ClientOperationBenchmarks*"
 // =====================================================================================================================
 using System.Threading.Channels;
@@ -26,6 +28,9 @@ namespace Oxia.Client.Benchmarks.Client;
 public sealed class EchoOxiaServer : G.OxiaClient.OxiaClientBase
 {
     private static readonly Google.Protobuf.ByteString Value = Google.Protobuf.ByteString.CopyFrom(new byte[100]);
+    // The responses are immutable once built: they are cached by shape so that the server allocates as little as possible
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<(int, int, int), G.WriteResponse> _writeResponses = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, G.ReadResponse> _readResponses = new();
 
     public string Address { get; set; } = "";
 
@@ -51,21 +56,26 @@ public sealed class EchoOxiaServer : G.OxiaClient.OxiaClientBase
         while (await requestStream.MoveNext(context.CancellationToken))
         {
             var request = requestStream.Current;
-            var response = new G.WriteResponse();
-            foreach (var _ in request.Puts) response.Puts.Add(new G.PutResponse { Status = G.Status.Ok, Version = new G.Version() });
-            foreach (var _ in request.Deletes) response.Deletes.Add(new G.DeleteResponse { Status = G.Status.Ok });
-            foreach (var _ in request.DeleteRanges) response.DeleteRanges.Add(new G.DeleteRangeResponse { Status = G.Status.Ok });
+            var response = _writeResponses.GetOrAdd((request.Puts.Count, request.Deletes.Count, request.DeleteRanges.Count), static shape =>
+            {
+                var r = new G.WriteResponse();
+                for (int i = 0; i < shape.Item1; i++) r.Puts.Add(new G.PutResponse { Status = G.Status.Ok, Version = new G.Version() });
+                for (int i = 0; i < shape.Item2; i++) r.Deletes.Add(new G.DeleteResponse { Status = G.Status.Ok });
+                for (int i = 0; i < shape.Item3; i++) r.DeleteRanges.Add(new G.DeleteRangeResponse { Status = G.Status.Ok });
+                return r;
+            });
             await responseStream.WriteAsync(response);
         }
     }
 
     public override async Task Read(G.ReadRequest request, IServerStreamWriter<G.ReadResponse> responseStream, ServerCallContext context)
     {
-        var response = new G.ReadResponse();
-        foreach (var _ in request.Gets)
+        var response = _readResponses.GetOrAdd(request.Gets.Count, static count =>
         {
-            response.Gets.Add(new G.GetResponse { Status = G.Status.Ok, Version = new G.Version(), Value = Value });
-        }
+            var r = new G.ReadResponse();
+            for (int i = 0; i < count; i++) r.Gets.Add(new G.GetResponse { Status = G.Status.Ok, Version = new G.Version(), Value = Value });
+            return r;
+        });
         await responseStream.WriteAsync(response);
     }
 }
@@ -76,7 +86,8 @@ public class ClientOperationBenchmarks
     private const int Pipelined = 1000;
 
     private TestGrpcServer _server = null!;
-    private IAsyncClient _client = null!;
+    private IAsyncClient _client = null!;       // BatchLinger 1 ms: the pipelined benchmarks
+    private IAsyncClient _immediate = null!;    // BatchLinger 0: one operation per round trip
     private byte[] _value = null!;
     private string[] _keys = null!;
     private ValueTask<PutResult>[] _puts = null!;
@@ -91,6 +102,7 @@ public class ClientOperationBenchmarks
         echo.Address = _server.Address;
 
         _client = await OxiaClient.CreateAsyncClientAsync(_server.Address, OxiaOptions.WithBatchLinger(TimeSpan.FromMilliseconds(1)));
+        _immediate = await OxiaClient.CreateAsyncClientAsync(_server.Address, OxiaOptions.WithBatchLinger(TimeSpan.Zero));
         _value = new byte[100];
         _keys = Enumerable.Range(0, Pipelined).Select(i => "key-" + i).ToArray();
         _puts = new ValueTask<PutResult>[Pipelined];
@@ -110,17 +122,18 @@ public class ClientOperationBenchmarks
     public async Task Cleanup()
     {
         await _client.CloseAsync();
+        await _immediate.CloseAsync();
         await _server.DisposeAsync();
     }
 
     [Benchmark]
-    public async ValueTask<PutResult> SinglePut() => await _client.PutAsync("key", _value);
+    public async ValueTask<PutResult> SinglePut() => await _immediate.PutAsync("key", _value);
 
     [Benchmark]
-    public async ValueTask<GetResult> SingleGet() => await _client.GetAsync("key");
+    public async ValueTask<GetResult> SingleGet() => await _immediate.GetAsync("key");
 
     [Benchmark]
-    public async ValueTask<Exception?> SingleDelete() => await _client.DeleteAsync("key");
+    public async ValueTask<Exception?> SingleDelete() => await _immediate.DeleteAsync("key");
 
     [Benchmark(OperationsPerInvoke = Pipelined)]
     public async Task PutPipelined()
