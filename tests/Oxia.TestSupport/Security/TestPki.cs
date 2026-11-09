@@ -9,7 +9,8 @@
 //                  peer    CN=oxia-peer    signed by the CA
 //                  client  CN=oxia-client  signed by the CA
 //              Both leaf certificates carry what openssl.conf puts into them: keyUsage (critical) digitalSignature+keyEncipherment,
-//              extendedKeyUsage serverAuth+clientAuth, subjectAltName DNS:localhost, IP:127.0.0.1, IP:192.168.1.2; RSA 2048 keys.
+//              extendedKeyUsage serverAuth+clientAuth, subjectAltName DNS:localhost, IP:127.0.0.1, IP:192.168.1.2 (+ the name/address
+//              of OXIA_TEST_HOST when the test process reaches the published ports under another name, e.g. host.docker.internal); RSA 2048 keys.
 //              `WriteTo(dir)` writes the six PEM files (ca.crt, peer.crt/key, client.crt/key; keys are PKCS#8 "PRIVATE KEY") so
 //              they can be referenced by Oxia.Common.Security.TlsOptions on the client side, and `PeerFiles` hands the same
 //              content to the server side (copied into the Docker container's tmpfs by the cluster fixture).
@@ -90,6 +91,17 @@ public sealed class TestPki : IDisposable
         san.AddDnsName("localhost");
         san.AddIpAddress(IPAddress.Parse("127.0.0.1"));
         san.AddIpAddress(IPAddress.Parse("192.168.1.2"));
+        // OXIA_TEST_HOST (a test process in a container that reaches the published ports as e.g. host.docker.internal): the tests dial that name
+        var host = IntegrationEnv.Host;
+        if (IPAddress.TryParse(host, out var hostIp))
+        {
+            if (!hostIp.Equals(IPAddress.Loopback) && !hostIp.Equals(IPAddress.Parse("192.168.1.2"))) san.AddIpAddress(hostIp);
+        }
+        else if (!host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            san.AddDnsName(host);
+        }
+
         request.CertificateExtensions.Add(san.Build());
 
         var serial = new byte[16];

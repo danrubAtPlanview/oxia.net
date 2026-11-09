@@ -23,9 +23,12 @@ public static class IntegrationEnv
     public const string CpusVar = "OXIA_TEST_CPUS";
     public const string SkipIfNoServerVar = "OXIA_TEST_SKIP_IF_NO_SERVER";
     public const string VerboseVar = "OXIA_TEST_VERBOSE";
+    public const string HostVar = "OXIA_TEST_HOST";
+    public const string ContainerHostVar = "OXIA_TEST_CONTAINER_HOST";
 
     public const string DefaultImage = "oxia/oxia:nightly-beta";
     public const int DefaultSlots = 8;
+    public const string DefaultHost = "127.0.0.1";
 
     /// <summary>OXIA_TEST_ADDRESS: an externally started standalone server; the Docker logic is skipped entirely.</summary>
     public static string? ExternalAddress => Get(AddressVar);
@@ -59,6 +62,24 @@ public static class IntegrationEnv
 
     /// <summary>OXIA_TEST_VERBOSE=1: the fixture prints what it does (docker commands, timings) to stderr.</summary>
     public static bool Verbose => IsTrue(VerboseVar);
+
+    /// <summary>
+    /// OXIA_TEST_HOST (default <c>127.0.0.1</c>): the host name/address under which the test process reaches the PUBLISHED container ports
+    /// (<c>docker port</c> prints only the port).  The default is right whenever the test process runs on the machine that runs the Docker
+    /// daemon (Windows, macOS, native Linux).  When the test process itself runs inside a Linux container that talks to the host's
+    /// daemon through its socket (Docker Desktop; a CI job container), 127.0.0.1 is the container's own loopback: set it to
+    /// <c>host.docker.internal</c> (Docker Desktop) or to the host's address.  The Oxia servers echo the authority a client dialled as the
+    /// leader address, so nothing else needs to know about it (docs/linux-validation.md).
+    /// </summary>
+    public static string Host => Get(HostVar) ?? DefaultHost;
+
+    /// <summary>
+    /// OXIA_TEST_CONTAINER_HOST: how the processes INSIDE the containers reach the test process (the OIDC provider the security tests host).
+    /// Unset = detect (<c>host.docker.internal</c> when it resolves in the container, else the container's default gateway); the value
+    /// <c>gateway</c> forces the default gateway (needed when the test process runs in a host-network container of Docker Desktop's VM, where
+    /// <c>host.docker.internal</c> names the Windows/macOS host, not the VM); any other value is used as is.
+    /// </summary>
+    public static string? ContainerHost => Get(ContainerHostVar);
 
     private static string? Get(string name)
     {

@@ -17,6 +17,8 @@
 //              and files written to /data/cluster<slot>/files, e.g. TLS certificates and OIDC key files); a cluster started with a profile is
 //              NOT opt-in (OXIA_TEST_CLUSTER), because `oxia standalone` has no TLS / auth flags and this is the only way to test them.
 //              GetHostAddressAsync tells how the container reaches the test host (for an OIDC provider hosted by the test process).
+//              Linux validation: the servers' public addresses are `{OXIA_TEST_HOST}:{published port}` (default 127.0.0.1) and
+//              OXIA_TEST_CONTAINER_HOST overrides / forces ("gateway") the way GetHostAddressAsync reaches the test host -- docs/linux-validation.md.
 // =====================================================================================================================
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -220,7 +222,7 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
         {
             slot = await LockAndStartAsync(container, name, serverCount, replicationFactor, initialShardCount, extraAuthority, ct, profile).ConfigureAwait(false);
             var servers = Enumerable.Range(0, serverCount)
-                .Select(i => new ClusterServer($"{name}-s{i + 1}", i, $"127.0.0.1:{container.HostPorts[PublicPort(slot, i)]}", $"127.0.0.1:{InternalPort(slot, i)}"))
+                .Select(i => new ClusterServer($"{name}-s{i + 1}", i, $"{IntegrationEnv.Host}:{container.HostPorts[PublicPort(slot, i)]}", $"127.0.0.1:{InternalPort(slot, i)}"))
                 .ToList();
             var cluster = new OxiaCluster(this, slot, name, extraAuthority, servers, initialShardCount, profile?.Probe);
             var healthSlot = slot;
@@ -234,6 +236,11 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
                 await Task.Delay(100, ct).ConfigureAwait(false);
             }
 
+            // Go: assert.Eventually(shard SteadyState && Leader != nil) on the coordinator's status -- here read from the coordinator's status file,
+            // and including the caught-up ensemble (see ClusterStatusFile: a data server that the coordinator has not reached yet would otherwise
+            // make the leader change, or never announce it, while the test is already running)
+            await WaitForSteadyStateAsync(container, slot, initialShardCount, TimeSpan.FromSeconds(90), ct).ConfigureAwait(false);
+
             Log($"cluster '{name}' ({serverCount} servers, rf={replicationFactor}, shards={initialShardCount}) ready in cluster slot {slot} in {sw.ElapsedMilliseconds} ms");
             slot = -1; // ownership moved to the OxiaCluster
             return cluster;
@@ -243,6 +250,34 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
             if (slot >= 0) await ReleaseClusterAsync(slot).ConfigureAwait(false);
             else _gate.Release();
             throw;
+        }
+    }
+
+    /// <summary>Polls the coordinator's status file until every shard is in steady state with a leader and a caught-up ensemble.</summary>
+    private async Task WaitForSteadyStateAsync(ReusableContainer container, int slot, uint shards, TimeSpan timeout, CancellationToken ct)
+    {
+        var path = $"/data/cluster{slot}/coord/status.json";
+        var deadline = DateTime.UtcNow + timeout;
+        var last = "no status file yet";
+        while (true)
+        {
+            var r = await container.ExecAsync(["cat", path], TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+            if (r.Ok)
+            {
+                if (ClusterStatusFile.IsSteady(r.StdOut, shards, out last)) return;
+            }
+            else
+            {
+                last = "status file not readable: " + r.Combined;
+            }
+
+            if (DateTime.UtcNow > deadline)
+            {
+                throw new TimeoutException($"cluster slot {slot} is not in steady state after {timeout.TotalSeconds:0} s: {last}" + Environment.NewLine +
+                                           await GetClusterLogsAsync(slot).ConfigureAwait(false));
+            }
+
+            await Task.Delay(100, ct).ConfigureAwait(false);
         }
     }
 
@@ -306,7 +341,7 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
         yaml.Append("servers:\n");
         for (var s = 0; s < serverCount; s++)
         {
-            yaml.Append(CultureInfo.InvariantCulture, $"  - name: {name}-s{s + 1}\n    public: 127.0.0.1:{container.HostPorts[PublicPort(c, s)]}\n    internal: 127.0.0.1:{InternalPort(c, s)}\n");
+            yaml.Append(CultureInfo.InvariantCulture, $"  - name: {name}-s{s + 1}\n    public: {IntegrationEnv.Host}:{container.HostPorts[PublicPort(c, s)]}\n    internal: 127.0.0.1:{InternalPort(c, s)}\n");
         }
 
         if (extraAuthority is not null) yaml.Append(CultureInfo.InvariantCulture, $"allowExtraAuthorities:\n  - {extraAuthority}\n");
@@ -410,10 +445,14 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
     /// </summary>
     public async Task<string> GetHostAddressAsync(CancellationToken ct = default)
     {
+        // OXIA_TEST_CONTAINER_HOST: an explicit address, or "gateway" to skip the host.docker.internal lookup (see IntegrationEnv.ContainerHost)
+        if (IntegrationEnv.ContainerHost is { } configured && !configured.Equals("gateway", StringComparison.OrdinalIgnoreCase)) return configured;
+
         var container = await EnsureContainerAsync(ct).ConfigureAwait(false);
-        var r = await container.ExecAsync(["sh", "-c",
-            "if getent hosts host.docker.internal >/dev/null 2>&1; then echo host.docker.internal; else ip route | awk '/^default/ {print $3; exit}'; fi"],
-            TimeSpan.FromSeconds(20), ct).ConfigureAwait(false);
+        var lookup = IntegrationEnv.ContainerHost is null
+            ? "if getent hosts host.docker.internal >/dev/null 2>&1; then echo host.docker.internal; else ip route | awk '/^default/ {print $3; exit}'; fi"
+            : "ip route | awk '/^default/ {print $3; exit}'";
+        var r = await container.ExecAsync(["sh", "-c", lookup], TimeSpan.FromSeconds(20), ct).ConfigureAwait(false);
         var host = r.StdOut.Trim();
         if (!r.Ok || host.Length == 0) throw new DockerException("could not determine how the cluster container reaches the host: " + r.Combined);
         return host;
@@ -447,7 +486,8 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
     {
         if (_container is not { } container) return "(no container)";
         var r = await container.ExecAsync(["sh", "-c",
-            $"for f in /data/cluster{c}/coord/log /data/cluster{c}/s*/log; do echo \"--- $f\"; tail -n 25 \"$f\"; done"], TimeSpan.FromSeconds(20)).ConfigureAwait(false);
+            $"for f in /data/cluster{c}/coord/log /data/cluster{c}/s*/log; do echo \"--- $f\"; tail -n 25 \"$f\"; done; " +
+            $"echo \"--- /data/cluster{c}/coord/status.json\"; head -c 4000 /data/cluster{c}/coord/status.json 2>&1"], TimeSpan.FromSeconds(20)).ConfigureAwait(false);
         return AnsiColors.Replace(r.Combined, "");
     }
 

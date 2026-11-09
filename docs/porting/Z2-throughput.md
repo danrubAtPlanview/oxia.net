@@ -35,7 +35,8 @@ would change it (pipelined batches) is **not enabled** and is documented as a pr
 
 ## Tests
 
-`tests/Oxia.Client.Tests/Throughput/`: `BatcherQueueTests` (13), `LingerTimerTests` (9), `CallPoolTests` (7), `GateAndOptionsTests` (10: ticket chain, retired-gate forwarding order, failing slow-path add,
+`tests/Oxia.Client.Tests/Throughput/`: `BatcherQueueTests` (13), `LingerTimerTests` (9; the `highResolution: true` case is a dynamic skip off Windows), `LingerTimerPortableTests` (4 test
+methods / 6 cases, Linux validation: the Monitor.Wait path that Linux and macOS run in production, 1 ms / 5 ms lingers, `TicksToMilliseconds`; see [`docs/linux-validation.md`](../linux-validation.md)), `CallPoolTests` (7), `GateAndOptionsTests` (10: ticket chain, retired-gate forwarding order, failing slow-path add,
 fast path reopening, queue capacity default/option, request timeout honoured while the first send waits for the connection, zero allocation of the parked path),
 `PipelineExperimentTests` (3), `LatencyHistogramTests` (10, the histogram source is linked into the test project), `TransportProxyCacheTests` (4). One assertion-neutral fix to a review test:
 `R1_HoldOrderTests` built its failure message with `First(...)`, which throws when the order is right — `FirstOrDefault` (the assertion is unchanged).
