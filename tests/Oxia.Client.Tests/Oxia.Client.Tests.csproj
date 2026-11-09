@@ -5,6 +5,12 @@
     <IsTestProject>true</IsTestProject>
     <RootNamespace>Oxia.Client.Tests</RootNamespace>
     <NoWarn>$(NoWarn);xUnit1051</NoWarn>
+    <!-- Directory.Build.props turns TieredPGO on for the product and the benchmarks.  The allocation-budget tests (Alloc/) measure the steady state of
+         optimised code, and the instrumented PGO tier allocates extra (probe data, delegate/type guards) for as long as a method sits in it. On a
+         small or busy machine (a 4-vCPU CI runner) the background JIT needs seconds to get the hot paths out of that tier, longer than any fixed warm-up,
+         which showed as 90-150 B/op instead of 5-16 B/op.  Without the instrumented tier a hot method goes from tier 0 to tier 1 directly.  Optimised
+         code with PGO never allocates MORE than the code without it, so the budgets stay conservative. -->
+    <TieredPGO>false</TieredPGO>
   </PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />

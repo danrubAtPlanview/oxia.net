@@ -13,6 +13,9 @@
 //              of the core count): the slow path of AddAsync (a full queue) is the batcher's own cost and is not what is measured here.
 //              Linux validation (L): the old "skip below 14 cores" guard was removed (stale since the queue capacity no longer follows
 //              ProcessorCount; it disabled these budgets on 4-core ubuntu-latest runners).
+//              First CI run (4-vCPU GitHub runners): Put/Get exceeded their budgets (90-155 B/op) because the instrumented PGO tier of the tiered
+//              JIT had not finished promoting the hot paths.  Fix: the test project builds with TieredPGO off (see its csproj) and MeasureAsync
+//              keeps measuring until the best result stops improving (a real regression allocates in every measurement and still fails).
 //   Budgets  : every non-zero budget is justified at its test.  What the budgets do NOT contain, by design: Grpc.Net.Client and the HTTP/2
 //              stack (about 2.3 KB per write-stream message, about 9 KB per Read / RangeScan call, shared by all the operations of a
 //              batch -- see docs/performance-allocation.md and `dotnet run -c Release --project benchmarks/Oxia.Client.Benchmarks -- alloc`).
@@ -59,8 +62,13 @@ public class EndToEndAllocationTests(ITestOutputHelper output)
             await Task.Delay(120);
         }
 
+        // Best of at least 3 measurements, and then until the best stops improving (two further measurements that are not at least 5 % better,
+        // at most 10 in all).  A fixed warm-up cannot be long enough for every machine: the background tiered JIT of a 4-vCPU CI runner needs
+        // seconds to promote the hot paths, and until it has, each measurement still carries tier-0 allocations (measured 90-150 B/op against a
+        // steady state of 5-16 B/op).  A real regression allocates in EVERY measurement, so it still fails: only noise and warm-up go away.
         double best = double.MaxValue;
-        for (int attempt = 0; attempt < 3; attempt++)
+        int settled = 0;
+        for (int attempt = 0; attempt < 10; attempt++)
         {
             GC.Collect();
             GC.WaitForPendingFinalizers();
@@ -69,8 +77,11 @@ public class EndToEndAllocationTests(ITestOutputHelper output)
             long done = await rounds(Math.Max(1, operations / opsPerRound));
             long allocated = GC.GetTotalAllocatedBytes(precise: true) - before - ((fakeBytes?.Invoke() ?? 0) - fakeBefore);
             double perOp = allocated / (double)done;
+            settled = perOp < best * 0.95 ? 0 : settled + 1;
             best = Math.Min(best, perOp);
             if (best <= 1) break;
+            if (attempt >= 2 && settled >= 2) break;
+            if (settled == 0) await Task.Delay(120); // still improving: give the tiering a quiet moment (its call counting starts after 100 ms without new tier-0 activity)
         }
         output.WriteLine($"{name}: {best:F2} B/op");
         return best;
