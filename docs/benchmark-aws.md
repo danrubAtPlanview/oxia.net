@@ -18,8 +18,10 @@ Method and safety design: [bench/aws/PLAN.md](../bench/aws/PLAN.md).
 * **Latency:** median latency is equal or better for .NET (B: 5.96 ms against 9.83 ms; E: 4.52 against 5.73). p99 is equal or better for .NET (B: 16.5 ms against 20.6 ms) except in F (14.8 against 13.0 ms, 1.13x). The **far tails are not better**: in the median repetition of D the
   p99.9 is 22.9 ms against 8.8 ms (2.6x) and in A the maximum is 37 ms against 11 ms (3.3x). Single-repetition maxima are noisy, but this is worth watching and has not been investigated.
 * **Client CPU per operation is higher for .NET when every operation is its own RPC or the rate is low:** C 30.5 us against 17.1 us (1.8x), F 247 us against 88 us (2.8x), G 109 us against 68 us (1.6x).
-  At 11-20 k ops/s the per-operation figure also carries whatever the runtime does in the background (thread pool, timers); how much of the gap that explains has not been measured. Not investigated; it is
-  the most useful follow-up from this run.
+  **Investigated afterwards** (local Linux reproduction with the same binaries, [`docs/performance.md`](performance.md) section 11): the excess is mostly the .NET thread pool, not client work. Idle workers
+  spin before they sleep (about 28 % of the CPU samples in F are one native spin instruction), and an unbatched operation costs about 8.7 thread pool hops, each a worker wake-up. With
+  `DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0` the CPU per operation fell by 12-33 % in every scenario (locally: C 22 -> 14 us against Go 16, F 301 -> 210 against 158, G 100 -> 79 against 65), at the price
+  of 5-9 % closed-loop throughput. It is a trade-off for the application to make (the setting is read at runtime start), not a default; it was **not** applied in this AWS run and has not been re-measured on AWS.
 * **Allocation** is lower for .NET in every scenario: 4-173 B per operation in the batching scenarios (A, B, D, E, G), 773 B for the sync client (C) and 4.9 KB without batching (F), against 1.7-6.0 KB for
   Go. The two numbers come from different counters (see the note under *Results*), so read them as an order of magnitude.
 * **Limits of the run:** one `oxia standalone` server (no cluster, no TLS, no authentication), one instance type (c6i.2xlarge), one region and availability zone, 3 repetitions per scenario, shared cloud

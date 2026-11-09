@@ -421,8 +421,10 @@ commit `5664944`, .NET 10.0.11, Go 1.27, Oxia server at the pinned upstream comm
 
 Two scenarios (F: no batching, 64 producers; G: open loop at 20 k ops/s) are in the full report. In short: the .NET client is ahead of or level with the Go client on throughput in every scenario, by the most when
 many producers share batches (B +56 %, E +21 %), and converges with it when the server is the limit (D). It is **not** better everywhere: it uses more client CPU per operation when each operation is its own RPC or
-the rate is low (C 1.8x, F 2.8x, G 1.6x the Go client's CPU per operation), and the far tail was worse in two scenarios (D p99.9 2.6x, A maximum 3.3x). Neither is explained yet; see the report. One server
-node, no TLS or authentication, one instance type and region, three repetitions, shared cloud hardware: read differences below 5-10 % as noise.
+the rate is low (C 1.8x, F 2.8x, G 1.6x the Go client's CPU per operation). That was traced to the .NET thread pool (idle workers spinning, about 9 worker wake-ups per unbatched operation):
+`DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0` cuts 12-33 % of the CPU per operation for 5-9 % of closed-loop throughput, see [`docs/performance.md`](docs/performance.md) section 11. The far tail was also
+worse in two scenarios (D p99.9 2.6x, A maximum 3.3x) and is not explained yet. One server node, no TLS or authentication, one instance type and region, three repetitions, shared cloud hardware: read
+differences below 5-10 % as noise.
 
 What these numbers do **not** show: TLS, authentication, a multi-node cluster, macOS. The Windows figures above are Windows plus Docker Desktop; the Linux figures are from the AWS run.
 
@@ -486,6 +488,7 @@ tests/Oxia.Client.IntegrationTests/  ported Go integration tests against a real 
 tests/Oxia.TestSupport/              in-process gRPC test server, Docker Oxia fixture, mock OIDC provider, test PKI
 benchmarks/Oxia.Client.Benchmarks/   BenchmarkDotNet suites, an allocation profiler and a load generator (with a Go counterpart for head-to-head runs)
 bench/aws/                           plan and tooling for the operator-run Linux benchmark on AWS
+bench/cpu-repro/                     local Docker tooling to reproduce and profile the client CPU per operation on Linux
 docs/                                documentation (start at docs/index.md); docs/porting/ holds the per-component upstream-to-C# file tables
 DESIGN.md, PORTING.md                the design contract of the port, and the upstream sync guide
 ```

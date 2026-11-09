@@ -201,8 +201,9 @@ K-1 earlier ones wait for their response (`--tune pipeline=K`). It keeps the ord
 * **Linger**: 5 ms (default) is honoured to ~0.5 ms now (a lone put: p50 6.1 ms; it was 15.8). For latency-sensitive callers use 1 ms or 0 (no batching: a lone put takes 0.48 ms round trip in docker, 64
   concurrent callers reach ~3k ops/s because every operation is a round trip of its own).
 * **`WithBatchQueueCapacity`** only matters beyond ~4096 concurrently pending operations per shard (back-pressure threshold; 22 would cost -40 %).
-* **CPU-constrained hosts**: the thread pool spin-waits for work; `DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0` (or `System.Threading.ThreadPool.UnfairSemaphoreSpinLimit` in `runtimeconfig.json`) cut the
-  CPU per operation from 5.6 to 3.6 us (-36 %) at the price of -11 % peak throughput and a worse p99 (1.9 -> 14 ms). A trade-off to take when the cores are needed elsewhere, not a default.
+* **CPU-constrained hosts, or low and unbatched traffic**: the thread pool spin-waits for work; `DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0` (or `System.Threading.ThreadPool.UnfairSemaphoreSpinLimit` in
+  `runtimeconfig.json`) cut the CPU per operation from 5.6 to 3.6 us (-36 %) at the price of -11 % peak throughput and a worse p99 (1.9 -> 14 ms) against the echo server on Windows; on Linux against the real
+  server it cut 12-33 % (batched and unbatched scenarios) at the price of 5-9 % closed-loop throughput (section 11). A trade-off to take when the cores are needed elsewhere, not a default.
 * Use one client per process and many concurrent callers; do not create a client per request (each owns a connection pool, batchers and a health loop).
 
 ## 10. Limits and open points
@@ -212,3 +213,43 @@ K-1 earlier ones wait for their response (`--tune pipeline=K`). It keeps the ord
 * Not measured: TLS, authentication, a multi-node cluster, Linux/macOS (the linger service falls back to a timed `Monitor.Wait`, whose resolution there is the OS's ~1 ms; the unit tests cover that path).
 * Windows only effect: other timers of the client (request timeouts, retry backoff, session keep-alive) still use `System.Threading.Timer` / `Task.Delay`; their precision (15.6 ms) is irrelevant at their
   scale (seconds).
+
+## 11. Follow-up (Linux): why the .NET client burns more CPU per operation than Go when every operation is its own RPC
+
+The first Linux run on AWS ([`benchmark-aws.md`](benchmark-aws.md)) showed the .NET client 1.6-2.8x above the Go client in client CPU per operation in the scenarios without batching or at a low rate
+(C sync client, F linger 0, G open loop 20k ops/s), while it was 1.0-2.8x *below* in the batching scenarios. This section is the investigation; the tooling is [`bench/cpu-repro`](../bench/cpu-repro/README.md).
+
+**Reproduction.** The same Linux load-generator binaries as the AWS run, in an Amazon Linux container, against a fresh `oxia standalone` container on the same Docker network (Docker Desktop VM, 8 CPUs; absolute
+throughput is lower than on AWS, the CPU per operation is what is compared). F: .NET 295-320 us/op against Go 147-158 us/op (AWS: 247 against 88).
+
+**Where the CPU goes** (`bench/cpu-repro/threads.sh`, `perf.sh`; F, 64 producers, linger 0):
+
+* The .NET process uses 2.4 cores for 7 k ops/s, of which **2.28 cores are the nine thread pool workers** and 0.12 the sockets epoll thread. Go uses 1.3 cores.
+* `perf` (cpu-clock sampling) puts about **28 % of all samples on one instruction of the runtime's native spin loop** (`Thread.SpinWait` / `YieldProcessor`) plus `sched_yield`: idle thread pool workers spinning
+  before they sleep. Every operation is a round trip of its own and costs about **8.7 thread pool work items** (counted by the load tool; the profile shows the HTTP/2 outgoing and incoming frame loops, the gRPC stream
+  reader and the sockets event handler among them, plus the client's own batcher wake-up and completion), so a worker is woken, spins and sleeps again for each hop.
+* With `DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0` the spin loop disappears and the profile is flat: about **30 % of the samples are the kernel wake-up path** (`_raw_spin_unlock_irqrestore` and the scheduler
+  after `futex_wake`: waking a sleeping worker, most likely on another vCPU, which in a VM is an inter-processor interrupt; not verified further), and no managed method above 1.1 %. The gap that remains is the cost of the hops themselves.
+
+**What the knobs did** (F, median of the runs; CPU per operation):
+
+| Setting | CPU us/op | Throughput | Note |
+|---|---:|---:|---|
+| default | 300-320 | 6.6 k ops/s | |
+| `ThreadPool_UnfairSemaphoreSpinLimit=0` | **210-235** (-29 %) | 6.1 k ops/s (-8 %) | the spin is gone, each wake-up now pays the futex latency |
+| `--tune inline=true` (completions inline) | 288 | 7.1 k | 8.7 -> 7.7 work items, CPU unchanged (rejected earlier, section 7) |
+| `SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS=1` | 288 | 7.0 k | 8.7 -> 7.5 work items, CPU unchanged |
+| `TieredPGO=0` / `TieredCompilation=0` | 330 / 415 | 6.7 k / 5.6 k | worse |
+
+All scenarios, one run each (default -> spin limit 0; Go in brackets; us/op): A 10.1 -> 6.1 (11.8), B 3.8 -> 3.2 (19.2), C 22.4 -> 14.1 (16.0), D 5.3 -> 4.2 (6.5), F 301 -> 210 (158), G 100 -> 79 (65).
+Three alternating repetitions of B and F: B 4.0 -> 3.5 us (-12 %) for -5 % throughput, F 316 -> 226 us (-29 %) for -8 % throughput.
+
+**Conclusion.**
+
+1. The excess is **thread pool spin-waiting and wake-up cost, not work done by the client**: per operation the client's own managed code is a few microseconds (the batching scenarios show it), the rest is the
+   runtime moving a request across 8-9 thread pool hops when nothing is batched. Go's scheduler can hand the next goroutine to the same thread without an operating-system wake-up, which is the likely reason it is cheaper here (not measured).
+2. It is a **trade-off, not a bug**: disabling the spin saves 12-33 % CPU per operation (and puts the .NET client below Go in A-D) but costs 5-9 % closed-loop throughput and some latency, because a woken worker
+   needs longer to start. That is the choice of the application (section 9), not something a library can make for its host process: the setting is read when the runtime starts.
+3. What would remove the rest is **fewer hops per operation**; candidates are chunked completion dispatch, a shorter path between the batcher and the HTTP/2 writer, or a transport other than `Grpc.Net.Client`. Inline completions were
+   measured again here and reduce the work items by 1-1.2 per operation without saving CPU; the others are large changes with a throughput risk and are **not** planned.
+4. Not measured here: AWS with the setting applied (the local container run differs in absolute numbers from the AWS run), TLS, and a cluster.
