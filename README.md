@@ -399,12 +399,37 @@ Get of a missing key 5.3 B (12), found Get 133 B (136) of which 124 B is the `by
 ([`docs/benchmark-results.md`](docs/benchmark-results.md)): the hand-written encoder serialises 1000 puts in 20.7 us against 34.8 us for protoc's generated code, and parses the response in 34.7 us with no
 allocation against 45.3 us and 141 KB.
 
-What these numbers do **not** show: TLS, authentication, a multi-node cluster, Linux or macOS (the end-to-end figures are Windows plus Docker Desktop).
+### Linux, on AWS
+
+The same head-to-head on dedicated Linux instances: two `c6i.2xlarge` (8 vCPU, Amazon Linux 2023, kernel 6.18) in one cluster placement group, an `oxia standalone` server on one and the load generators on the
+other. The two clients run on the same client instance one at a time, the server is reset before every run, and the table shows the median of three repetitions (run `20261109-092619-fb44`, built from
+commit `5664944`, .NET 10.0.11, Go 1.27, Oxia server at the pinned upstream commit). The full report (environment, min-max, tail latencies, server CPU) is in
+**[`docs/benchmark-aws.md`](docs/benchmark-aws.md)**; the method and the always-torn-down environment are described in [`bench/aws/PLAN.md`](bench/aws/PLAN.md).
+
+| Scenario | Client | ops/s | p50 ms | p99 ms | client CPU us/op | allocated B/op |
+|---|---|---:|---:|---:|---:|---:|
+| A: async, 256 producers, put+get 50/50, linger 5 ms | **.NET** | 42,449 | 6.19 | 8.45 | 15.2 | 115 |
+| | Go | 38,683 | 6.62 | 8.52 | 12.1 | 1,626 |
+| B: async, 1000 producers, put only, linger 5 ms | **.NET** | 144,765 | 5.96 | 16.52 | 5.2 | 4 |
+| | Go | 92,829 | 9.83 | 20.58 | 14.2 | 1,792 |
+| C: sync client, 64 callers, put+get 50/50 | **.NET** | 12,010 | 5.60 | 6.42 | 30.5 | 773 |
+| | Go | 11,281 | 5.70 | 6.49 | 17.1 | 1,772 |
+| D: async, 1000 producers, put+get, linger 1 ms, 4 shards (server-bound) | **.NET** | 401,056 | 2.39 | 5.44 | 7.7 | 121 |
+| | Go | 393,484 | 2.42 | 5.44 | 8.8 | 1,661 |
+| E: async, 256 producers, put only, 1 KiB values | **.NET** | 50,425 | 4.52 | 10.81 | 17.2 | 33 |
+| | Go | 41,773 | 5.73 | 11.80 | 16.4 | 1,860 |
+
+Two scenarios (F: no batching, 64 producers; G: open loop at 20 k ops/s) are in the full report. In short: the .NET client is ahead of or level with the Go client on throughput in every scenario, by the most when
+many producers share batches (B +56 %, E +21 %), and converges with it when the server is the limit (D). It is **not** better everywhere: it uses more client CPU per operation when each operation is its own RPC or
+the rate is low (C 1.8x, F 2.8x, G 1.6x the Go client's CPU per operation), and the far tail was worse in two scenarios (D p99.9 2.6x, A maximum 3.3x). Neither is explained yet; see the report. One server
+node, no TLS or authentication, one instance type and region, three repetitions, shared cloud hardware: read differences below 5-10 % as noise.
+
+What these numbers do **not** show: TLS, authentication, a multi-node cluster, macOS. The Windows figures above are Windows plus Docker Desktop; the Linux figures are from the AWS run.
 
 * Method, what changed, what did not help, recommended settings: [`docs/performance.md`](docs/performance.md)
 * Allocation protocol and budgets: [`docs/performance-allocation.md`](docs/performance-allocation.md)
 * Every micro-benchmark: [`docs/benchmark-results.md`](docs/benchmark-results.md); how to run them: [`benchmarks/README.md`](benchmarks/README.md)
-* Linux benchmark on AWS: see `docs/benchmark-aws.md` (published when the AWS run completes)
+* Linux benchmark on AWS: [`docs/benchmark-aws.md`](docs/benchmark-aws.md) (how to run it yourself, on demand and always torn down: [`bench/aws/README.md`](bench/aws/README.md))
 
 ## Testing
 

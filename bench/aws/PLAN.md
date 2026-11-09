@@ -141,7 +141,10 @@ The orchestration was exercised against the real QA account with **stub artifact
 instances, separate data volume), artifact upload and install over SSM, per-run server reset / load / stats round trips, report generation, and the guaranteed teardown, which ended in
 `TEARDOWN VERIFIED` and an independent `Status` showing no stacks, instances, volumes, VPCs, buckets or roles. The same self-test caught (and the plan now documents) the `Throughput`
 restriction of instance block-device mappings and made the failure path print CloudFormation `DescribeEvents` validation details even though `--on-failure DELETE` removes the failed stack.
-Real-binary results: see `docs/benchmark-aws.md` once published.
+Real-binary runs: a one-scenario smoke run, then the full **`standard` suite** (run `20261109-092619-fb44`: 7 scenarios x 2 clients x 3 repetitions = 42 load runs on two `c6i.2xlarge`,
+about 66 minutes of wall clock including a 4-minute stack creation and a 3-minute delete, no failed run), again ending in `TEARDOWN VERIFIED`. Its report is published as
+[`docs/benchmark-aws.md`](../../docs/benchmark-aws.md). One operational finding: when the operator machine goes to sleep the orchestrator pauses (here for 32 minutes between two repetitions) while the
+instances keep running and cost money; the load runs themselves are not affected. Keep the machine awake for the hour, or use the dead-man switch as the backstop it is.
 
 ## 10. Risks and open questions
 

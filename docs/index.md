@@ -20,7 +20,7 @@ oxia.net is an unofficial .NET port of the [Oxia](https://github.com/oxia-db/oxi
 | [Performance](performance.md) | throughput and latency work, the .NET versus Go head-to-head against a real server, what did not help, recommended settings |
 | [Allocation](performance-allocation.md) | the zero-allocation design, per-operation budgets, the response ownership protocol, the pooled read API |
 | [Benchmark results](benchmark-results.md) | every micro-benchmark (BenchmarkDotNet) and the end-to-end comparison, generated from a full run |
-| Linux benchmark on AWS | `docs/benchmark-aws.md`, published when the AWS run completes (the environment is described in [`bench/aws/PLAN.md`](../bench/aws/PLAN.md)) |
+| Linux benchmark on AWS | [`docs/benchmark-aws.md`](benchmark-aws.md) (the environment and method are described in [`bench/aws/PLAN.md`](../bench/aws/PLAN.md)) |
 | [Review findings](review-findings.md) | the independent fidelity review: 13 defects found and fixed, what was verified, what is left as upstream parity |
 | [Linux validation](linux-validation.md) | the test suite run on Linux (written separately; see the file for its status) |
 

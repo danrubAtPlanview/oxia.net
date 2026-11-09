@@ -17,6 +17,14 @@ The version of the **upstream** Go client this port tracks is recorded separatel
 * GitHub configuration: CI workflow (build and unit tests on Linux and Windows, integration tests against the Docker server fixture), a manual-only
   benchmark workflow, Dependabot, issue and pull request templates, `CODEOWNERS`.
 * `.editorconfig` and `.gitattributes`.
+* On-demand Linux benchmark on AWS (`bench/aws`: one CloudFormation stack per run, SSM instead of SSH, verified teardown) and its first published result,
+  [`docs/benchmark-aws.md`](docs/benchmark-aws.md): the .NET client against the Go client on two `c6i.2xlarge` instances.
+* Linux validation of the test suites: [`docs/linux-validation.md`](docs/linux-validation.md).
+
+### Fixed
+
+* Allocation-budget tests are stable on small CI runners (TieredPGO is off for the test project and the measurement runs until the best result settles).
+* `bench.ps1 Down` no longer fails on a stack that is still being created.
 
 ## [0.1.0] - 2026-11-09
 
