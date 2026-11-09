@@ -17,6 +17,9 @@
 //       the test only passes if the translated exception still lets OxiaErrors.FromGrpcError recover the ErrorInfo metadata.
 //       If it does not, that is a cross-component finding (component A/B), not a reason to change this test.
 //     * `assert.Equal(t, shard.Leader.Public, leader)` inside the polling loop is evaluated exactly like Go (it fails the test at once).
+//     * Linux validation: a failure of the polling helper appends the coordinator / server logs and the coordinator's status (diagnostics only), and
+//       OxiaClusterFixture.StartAsync now waits for the Go precondition "shard SteadyState with a leader" (plus a caught-up ensemble) before returning --
+//       without it this test failed 1 run in ~7 on a loaded native-Linux Docker host with a hint naming another server than the leader it had been given.
 // =====================================================================================================================
 using Oxia.Common.Constant;
 using Oxia.Common.Proto;
@@ -60,7 +63,20 @@ public class LeaderHintTests(OxiaClusterFixture clusters)
     /// which must be the leader's public address.  The assignment dispatcher on the non-leader may not have received the shard
     /// assignments yet, so retry until the leader hint is present.
     /// </summary>
-    private static async Task EventuallyLeaderHint<TResponse>(Func<IServerStreamingClient<TResponse>> open, string leaderPublic) where TResponse : class
+    private static async Task EventuallyLeaderHint<TResponse>(OxiaCluster cluster, Func<IServerStreamingClient<TResponse>> open, string leaderPublic) where TResponse : class
+    {
+        try
+        {
+            await EventuallyLeaderHintCore(open, leaderPublic);
+        }
+        catch (Xunit.Sdk.XunitException e)
+        {
+            // diagnostics only (Linux validation): the logs of the coordinator and the servers, and the coordinator's status, say WHY the hint was not the leader
+            throw new Xunit.Sdk.XunitException(e.Message + Environment.NewLine + await cluster.GetLogsAsync(), e);
+        }
+    }
+
+    private static async Task EventuallyLeaderHintCore<TResponse>(Func<IServerStreamingClient<TResponse>> open, string leaderPublic) where TResponse : class
     {
         await TestUtil.Eventually(async () =>
         {
@@ -109,7 +125,7 @@ public class LeaderHintTests(OxiaClusterFixture clusters)
         var clientRpc = clientPool.GetClientRpc(target);
         long shardID = 0;
 
-        await EventuallyLeaderHint(() => clientRpc.Read(new ReadRequest { Shard = shardID }, TestCtx), leader.Public);
+        await EventuallyLeaderHint(cluster, () => clientRpc.Read(new ReadRequest { Shard = shardID }, TestCtx), leader.Public);
     }
 
     [Fact(Skip = Infrastructure.ClusterGate.Reason, SkipUnless = nameof(Infrastructure.ClusterGate.Enabled), SkipType = typeof(Infrastructure.ClusterGate))]
@@ -122,7 +138,7 @@ public class LeaderHintTests(OxiaClusterFixture clusters)
         var clientRpc = clientPool.GetClientRpc(target);
         long shardID = 0;
 
-        await EventuallyLeaderHint(() => clientRpc.List(new ListRequest { Shard = shardID }, TestCtx), leader.Public); //nolint:staticcheck
+        await EventuallyLeaderHint(cluster, () => clientRpc.List(new ListRequest { Shard = shardID }, TestCtx), leader.Public); //nolint:staticcheck
     }
 
     [Fact(Skip = Infrastructure.ClusterGate.Reason, SkipUnless = nameof(Infrastructure.ClusterGate.Enabled), SkipType = typeof(Infrastructure.ClusterGate))]
@@ -153,7 +169,7 @@ public class LeaderHintTests(OxiaClusterFixture clusters)
         var clientRpc = clientPool.GetClientRpc(target);
         long shardID = 0;
 
-        await EventuallyLeaderHint(() => clientRpc.RangeScan(new RangeScanRequest { Shard = shardID }, TestCtx), leader.Public);
+        await EventuallyLeaderHint(cluster, () => clientRpc.RangeScan(new RangeScanRequest { Shard = shardID }, TestCtx), leader.Public);
     }
 
     [Fact(Skip = Infrastructure.ClusterGate.Reason, SkipUnless = nameof(Infrastructure.ClusterGate.Enabled), SkipType = typeof(Infrastructure.ClusterGate))]

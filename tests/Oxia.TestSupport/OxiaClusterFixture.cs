@@ -236,6 +236,11 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
                 await Task.Delay(100, ct).ConfigureAwait(false);
             }
 
+            // Go: assert.Eventually(shard SteadyState && Leader != nil) on the coordinator's status -- here read from the coordinator's status file,
+            // and including the caught-up ensemble (see ClusterStatusFile: a data server that the coordinator has not reached yet would otherwise
+            // make the leader change, or never announce it, while the test is already running)
+            await WaitForSteadyStateAsync(container, slot, initialShardCount, TimeSpan.FromSeconds(90), ct).ConfigureAwait(false);
+
             Log($"cluster '{name}' ({serverCount} servers, rf={replicationFactor}, shards={initialShardCount}) ready in cluster slot {slot} in {sw.ElapsedMilliseconds} ms");
             slot = -1; // ownership moved to the OxiaCluster
             return cluster;
@@ -245,6 +250,34 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
             if (slot >= 0) await ReleaseClusterAsync(slot).ConfigureAwait(false);
             else _gate.Release();
             throw;
+        }
+    }
+
+    /// <summary>Polls the coordinator's status file until every shard is in steady state with a leader and a caught-up ensemble.</summary>
+    private async Task WaitForSteadyStateAsync(ReusableContainer container, int slot, uint shards, TimeSpan timeout, CancellationToken ct)
+    {
+        var path = $"/data/cluster{slot}/coord/status.json";
+        var deadline = DateTime.UtcNow + timeout;
+        var last = "no status file yet";
+        while (true)
+        {
+            var r = await container.ExecAsync(["cat", path], TimeSpan.FromSeconds(10), ct).ConfigureAwait(false);
+            if (r.Ok)
+            {
+                if (ClusterStatusFile.IsSteady(r.StdOut, shards, out last)) return;
+            }
+            else
+            {
+                last = "status file not readable: " + r.Combined;
+            }
+
+            if (DateTime.UtcNow > deadline)
+            {
+                throw new TimeoutException($"cluster slot {slot} is not in steady state after {timeout.TotalSeconds:0} s: {last}" + Environment.NewLine +
+                                           await GetClusterLogsAsync(slot).ConfigureAwait(false));
+            }
+
+            await Task.Delay(100, ct).ConfigureAwait(false);
         }
     }
 
@@ -453,7 +486,8 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
     {
         if (_container is not { } container) return "(no container)";
         var r = await container.ExecAsync(["sh", "-c",
-            $"for f in /data/cluster{c}/coord/log /data/cluster{c}/s*/log; do echo \"--- $f\"; tail -n 25 \"$f\"; done"], TimeSpan.FromSeconds(20)).ConfigureAwait(false);
+            $"for f in /data/cluster{c}/coord/log /data/cluster{c}/s*/log; do echo \"--- $f\"; tail -n 25 \"$f\"; done; " +
+            $"echo \"--- /data/cluster{c}/coord/status.json\"; head -c 4000 /data/cluster{c}/coord/status.json 2>&1"], TimeSpan.FromSeconds(20)).ConfigureAwait(false);
         return AnsiColors.Replace(r.Combined, "");
     }
 
