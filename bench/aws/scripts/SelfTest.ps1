@@ -14,8 +14,8 @@
 [CmdletBinding()]
 param(
     [switch]$ExerciseSweep,
-    [string]$AwsProfile = 'QA',
-    [string]$Region = 'us-west-2',
+    [string]$AwsProfile = $(if ($env:OXIA_BENCH_AWS_PROFILE) { $env:OXIA_BENCH_AWS_PROFILE } else { 'QA' }),
+    [string]$Region = $(if ($env:OXIA_BENCH_REGION) { $env:OXIA_BENCH_REGION } else { 'us-west-2' }),
     [string]$InstanceType = 't3.small'
 )
 $ErrorActionPreference = 'Stop'
