@@ -122,22 +122,35 @@ function New-Report {
     $null = $sb.AppendLine("(.NET: GC allocation counter; Go: runtime MemStats) - the two are measured by each runtime and are indicative, not byte-identical definitions.")
     $null = $sb.AppendLine()
 
-    $scenarioIds = @($runs | ForEach-Object { $_.scenario } | Select-Object -Unique)
+    # tuning variants (scenario field "variantOf") are shown as an extra .NET row of the scenario they vary
+    $variantKeys = [ordered]@{}
+    foreach ($r in $runs) {
+        $vOf = Get-Val $r 'variantOf'
+        if ($vOf) { $variantKeys["$vOf|$(Get-Val $r 'variantLabel')"] = @{ Of = $vOf; Label = Get-Val $r 'variantLabel' } }
+    }
+    $scenarioIds = @($runs | Where-Object { -not (Get-Val $_ 'variantOf') } | ForEach-Object { $_.scenario } | Select-Object -Unique)
     foreach ($sid in $scenarioIds) {
-        $sRuns = @($runs | Where-Object { $_.scenario -eq $sid })
+        $sRuns = @($runs | Where-Object { $_.scenario -eq $sid -and -not (Get-Val $_ 'variantOf') })
         $title = Get-Val $sRuns[0] 'scenarioName' $sid
         $null = $sb.AppendLine("### $sid - $title")
         $null = $sb.AppendLine()
         $null = $sb.AppendLine("| Impl | ops/s (median) | min-max ops/s | p50 | p99 | p99.9 | max | client CPU us/op | alloc B/op | errors | server CPU (% of 1 core) | runs |")
         $null = $sb.AppendLine("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
         $med = @{}
-        foreach ($impl in 'dotnet', 'go') {
-            $r = @($sRuns | Where-Object { $_.impl -eq $impl })
+        $rows = [System.Collections.Generic.List[object]]::new()
+        $rows.Add(@{ Key = 'dotnet'; Runs = @($sRuns | Where-Object { $_.impl -eq 'dotnet' }); Label = '**.NET**' })
+        foreach ($v in $variantKeys.Values) {
+            if ($v.Of -ne $sid) { continue }
+            $rows.Add(@{ Key = "dotnet|$($v.Label)"; Runs = @($runs | Where-Object { (Get-Val $_ 'variantOf') -eq $sid -and (Get-Val $_ 'variantLabel') -eq $v.Label }); Label = "**.NET** ($($v.Label))" })
+        }
+        $rows.Add(@{ Key = 'go'; Runs = @($sRuns | Where-Object { $_.impl -eq 'go' }); Label = 'Go' })
+        foreach ($row in $rows) {
+            $impl = $row.Key; $r = @($row.Runs)
             if ($r.Count -eq 0) { continue }
             $m = Get-MedianRun $r
             $med[$impl] = $m
             $ops = @($r | ForEach-Object { [double](Get-Val $_.result 'ops_per_s' 0) })
-            $label = if ($impl -eq 'dotnet') { '**.NET**' } else { 'Go' }
+            $label = $row.Label
             $res = $m.result
             $null = $sb.AppendLine(("| {0} | {1} | {2}-{3} | {4} | {5} | {6} | {7} | {8} | {9} | {10} | {11} | {12} |" -f $label,
                     (Format-Num (Get-Val $res 'ops_per_s')), (Format-Num ($ops | Measure-Object -Minimum).Minimum), (Format-Num ($ops | Measure-Object -Maximum).Maximum),
@@ -145,13 +158,17 @@ function New-Report {
                     (Format-Num (Get-Val $res 'cpu_us_per_op') 'N2'), (Format-Num (Get-Val $res 'alloc_bytes_per_op') 'N0'),
                     (Format-Num (Get-Val $res 'errors')), (Format-Num (Get-Val $m.server 'server_cpu_pct') 'N0'), $r.Count))
         }
-        if ($med.ContainsKey('dotnet') -and $med.ContainsKey('go')) {
-            $a = $med['dotnet'].result; $b = $med['go'].result
-            function Ratio($x, $y) { if ($null -eq $x -or $null -eq $y -or [double]$y -eq 0) { return 'n/a' } return ([double]$x / [double]$y).ToString('N2', [Globalization.CultureInfo]::InvariantCulture) }
-            $null = $sb.AppendLine(("| *.NET / Go* | *{0}* | | *{1}* | *{2}* | *{3}* | *{4}* | *{5}* | *{6}* | | |" -f
-                    (Ratio (Get-Val $a 'ops_per_s') (Get-Val $b 'ops_per_s')), (Ratio (Get-Val $a 'p50_us') (Get-Val $b 'p50_us')), (Ratio (Get-Val $a 'p99_us') (Get-Val $b 'p99_us')),
-                    (Ratio (Get-Val $a 'p999_us') (Get-Val $b 'p999_us')), (Ratio (Get-Val $a 'max_us') (Get-Val $b 'max_us')),
-                    (Ratio (Get-Val $a 'cpu_us_per_op') (Get-Val $b 'cpu_us_per_op')), (Ratio (Get-Val $a 'alloc_bytes_per_op') (Get-Val $b 'alloc_bytes_per_op'))))
+        function Ratio($x, $y) { if ($null -eq $x -or $null -eq $y -or [double]$y -eq 0) { return 'n/a' } return ([double]$x / [double]$y).ToString('N2', [Globalization.CultureInfo]::InvariantCulture) }
+        if ($med.ContainsKey('go')) {
+            foreach ($row in $rows) {
+                if (-not $row.Key.StartsWith('dotnet') -or -not $med.ContainsKey($row.Key)) { continue }
+                $a = $med[$row.Key].result; $b = $med['go'].result
+                $rl = if ($row.Key -eq 'dotnet') { '.NET / Go' } else { ".NET ($($row.Key.Substring(7))) / Go" }
+                $null = $sb.AppendLine(("| *{0}* | *{1}* | | *{2}* | *{3}* | *{4}* | *{5}* | *{6}* | *{7}* | | |" -f $rl,
+                        (Ratio (Get-Val $a 'ops_per_s') (Get-Val $b 'ops_per_s')), (Ratio (Get-Val $a 'p50_us') (Get-Val $b 'p50_us')), (Ratio (Get-Val $a 'p99_us') (Get-Val $b 'p99_us')),
+                        (Ratio (Get-Val $a 'p999_us') (Get-Val $b 'p999_us')), (Ratio (Get-Val $a 'max_us') (Get-Val $b 'max_us')),
+                        (Ratio (Get-Val $a 'cpu_us_per_op') (Get-Val $b 'cpu_us_per_op')), (Ratio (Get-Val $a 'alloc_bytes_per_op') (Get-Val $b 'alloc_bytes_per_op'))))
+            }
         }
         $null = $sb.AppendLine()
     }

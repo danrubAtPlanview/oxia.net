@@ -56,6 +56,8 @@ If a run was interrupted: `pwsh bench/aws/scripts/bench.ps1 Status`, then `Down`
 
 `suites/*.json`: a `defaults` object plus `scenarios` that override it (`client`, `ops`, `readPercent`, `keyCount`, `valueSize`, `producers`, `linger`, `maxRequestsPerBatch`, `rate` for open loop,
 `shards`, `serverSync`, `notifications`, `durationSec`, `warmupSec`, `runs`). Add a scenario by adding an object; no code changes. Every scenario runs both implementations, `runs` times each.
+A **tuning variant** of a scenario (the `cpu` suite) repeats the scenario's fields and adds `"impls": ["dotnet"]` (run only that implementation), `"dotnetEnv": "NAME=VALUE ..."` (environment variables for the .NET load tool, e.g. `DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0`),
+`"variantOf": "<scenario id>"` and `"variantLabel"`: the report shows it as an extra .NET row of the scenario it varies.
 
 ## Validating changes to this tooling (almost free)
 

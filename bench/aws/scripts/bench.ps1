@@ -228,10 +228,13 @@ function Invoke-Run {
     foreach ($s in $suite.Scenarios) {
         Write-Step "scenario $($s.id): $($s.name)"
         for ($rep = 1; $rep -le [int]$s.runs; $rep++) {
-            foreach ($impl in (Get-ImplOrder $rep)) {
+            foreach ($impl in (Get-ScenarioImpls $s $rep)) {
                 $n++
                 $tag = "$($s.id)-$impl-$rep"
                 $record = [ordered]@{ scenario = $s.id; scenarioName = $s.name; impl = $impl; rep = $rep; startedUtc = (ConvertTo-Utc (Get-Date)); ok = $false }
+                $runEnv = ConvertTo-RunEnv $s $impl
+                if ($s.Contains('variantOf')) { $record['variantOf'] = $s['variantOf']; $record['variantLabel'] = $s['variantLabel'] }
+                if ($runEnv) { $record['env'] = $runEnv.Substring(4).Trim() }
                 for ($attempt = 1; $attempt -le 2; $attempt++) {
                     try {
                         # fresh server for every run
@@ -239,7 +242,7 @@ function Invoke-Run {
                         $remoteLog = "/var/log/oxia-bench/run-$tag.log"
                         $loadArgs = ConvertTo-LoadArgs -Scenario $s -Impl $impl -Addr $addr -OutFile $remoteLog
                         $timeout = [int]$s.warmupSec + [int]$s.durationSec + 240
-                        $r = Invoke-Ssm -InstanceId $state.clientInstanceId -TimeoutSec $timeout -What "load $tag" -Script "$InstallDir/run-load.sh $loadArgs"
+                        $r = Invoke-Ssm -InstanceId $state.clientInstanceId -TimeoutSec $timeout -What "load $tag" -Script "$($runEnv)$InstallDir/run-load.sh $loadArgs"
                         $r.Stdout | Set-Content (Join-Path $logs "$tag.log") -Encoding utf8
                         $line = Find-ResultLine $r.Stdout
                         if (-not $line) { throw "no RESULT line in the output of $tag" }
