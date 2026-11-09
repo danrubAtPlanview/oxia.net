@@ -91,9 +91,10 @@ used to be skipped below 14 cores now run; the keep-alive timing test moved to t
 | **final 1-3** | 4 | Release | 1786 | 1780 | 0 | 6 | 119 / 113 / 118 s |
 | **final, OPEN** | 2 | Release | 1786 | 1690 reported, 0 failed | - | - | **stalled**: after 1690 results no test completed for > 4 min (process idle, ~16 % CPU); killed, **not investigated** |
 
-**Open item (2 CPUs).** The only 2-CPU run stalled in the parallel/serial phase boundary region of the suite. It is unknown whether a test or the product hangs when
-`Environment.ProcessorCount == 2` or whether the run is merely extremely slow (thread-pool pre-sizing to 256 threads on 2 cores, ~1800 tests in parallel). The 4-CPU runs
-(113-119 s) are healthy. Before using a 2-vCPU instance for the test suite, re-run it with `docker update --cpus 2` and list the tests without a result
+**Open item (2 CPUs).** The only 2-CPU run stalled at the start of the non-parallel phase: comparing `dotnet test --list-tests` with the reported names, the 92 tests
+without a result are exactly those of the non-parallel collections (`Z1 serial`: `Alloc.*`; `R1 serial`: `Review.R1_*`, `R2_SessionsStress*`, `LingerTimer*`,
+`GateAndOptionsTests`, `PipelineExperimentTests`, `KeepAliveTimingTests`) — all 1694 parallel-phase tests reported, 0 failed. So one test of the first serial
+collection hangs or is extremely slow when `Environment.ProcessorCount == 2`; which one is unknown (a test or the product). The 4-CPU runs (113-119 s) are healthy. Before using a 2-vCPU instance for the test suite, re-run it with `docker update --cpus 2` and list the tests without a result
 (`dotnet test --list-tests` minus the reported names). The AWS benchmark does not run the unit suite.
 
 The single failure: `SessionsTests.TestSessions_KeepAliveRetryDelayDoesNotGrow` (`retry delay after failure 3: 00:00:00.546` against a bound of 500 ms). See "Flakes".
