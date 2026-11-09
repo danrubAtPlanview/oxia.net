@@ -23,13 +23,18 @@ function Get-BenchStack([string]$StackName) {
 }
 
 function Get-StackOutput($Stack, [string]$Key) {
-    $o = @($Stack.Outputs) | Where-Object { $_ -and $_.OutputKey -eq $Key } | Select-Object -First 1
+    # a stack that is still being created (or failed early) has no Outputs property at all, which Set-StrictMode would turn into an error
+    $p = $Stack.PSObject.Properties['Outputs']
+    if ($null -eq $p) { return $null }
+    $o = @($p.Value) | Where-Object { $_ -and $_.OutputKey -eq $Key } | Select-Object -First 1
     if ($o) { return $o.OutputValue }
     return $null
 }
 
 function Get-StackTag($Stack, [string]$Key) {
-    $t = @($Stack.Tags) | Where-Object { $_ -and $_.Key -eq $Key } | Select-Object -First 1
+    $p = $Stack.PSObject.Properties['Tags']
+    if ($null -eq $p) { return $null }
+    $t = @($p.Value) | Where-Object { $_ -and $_.Key -eq $Key } | Select-Object -First 1
     if ($t) { return $t.Value }
     return $null
 }
