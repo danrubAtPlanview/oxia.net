@@ -1,0 +1,45 @@
+# Text files are normalised to LF in the repository (the index is already LF).
+* text=auto
+
+# Always LF in the working tree as well, also on Windows checkouts: shebangs, scripts, CI and tooling configuration
+*.sh              text eol=lf
+*.ps1             text eol=lf
+*.py              text eol=lf
+*.yml             text eol=lf
+*.yaml            text eol=lf
+.editorconfig     text eol=lf
+.gitattributes    text eol=lf
+.gitignore        text eol=lf
+.github/CODEOWNERS text eol=lf
+
+# Sources and documents
+*.cs              text diff=csharp
+*.csproj          text
+*.props           text
+*.slnx            text
+*.proto           text
+*.go              text eol=lf
+go.mod            text eol=lf
+*.json            text
+*.md              text diff=markdown
+LICENSE           text
+NOTICE            text
+
+# Binary files (never touched by the line-ending conversion)
+*.png             binary
+*.jpg             binary
+*.jpeg            binary
+*.gif             binary
+*.ico             binary
+*.svg             text
+*.pdf             binary
+*.zip             binary
+*.gz              binary
+*.7z              binary
+*.nupkg           binary
+*.snupkg          binary
+*.dll             binary
+*.exe             binary
+*.pdb             binary
+*.pfx             binary
+*.snk             binary

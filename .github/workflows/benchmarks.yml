@@ -1,0 +1,73 @@
+name: Benchmarks
+
+# MANUAL ONLY (workflow_dispatch). Runs the BenchmarkDotNet micro-benchmark suites (wire codecs and common utilities by default)
+# with `--job short --memory` and uploads the BenchmarkDotNet artifacts.
+#
+# Read the numbers as ratios and as exact allocation figures: GitHub-hosted runners are shared, virtualised machines, so absolute
+# times are noisy. The curated results of the project are in docs/benchmark-results.md and docs/performance.md.
+#
+# The end-to-end benchmark against a real Oxia server on Linux (.NET client vs Go client, same server, same conditions) runs on
+# AWS and is operator-run from bench/aws. It needs AWS credentials, which are NEVER stored in this repository or in GitHub secrets.
+
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: BenchmarkDotNet --filter globs, space separated (class names are matched fully qualified, e.g. *Codec*)
+        required: true
+        default: "*Codec* *Common*"
+      os:
+        description: Runner
+        required: true
+        default: ubuntu-latest
+        type: choice
+        options:
+          - ubuntu-latest
+          - windows-latest
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  benchmarks:
+    name: BenchmarkDotNet (${{ inputs.os }})
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Packages.props', 'global.json') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Run benchmarks
+        shell: bash
+        env:
+          BENCH_FILTER: ${{ inputs.filter }}
+        run: |
+          # the globs are passed as separate quoted arguments: the shell must not expand the * characters
+          read -r -a filters <<< "$BENCH_FILTER"
+          dotnet run -c Release --project benchmarks/Oxia.Client.Benchmarks -- \
+            --filter "${filters[@]}" --job short --memory --exporters json github
+
+      - name: Upload BenchmarkDotNet artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: benchmarkdotnet-artifacts-${{ runner.os }}
+          path: BenchmarkDotNet.Artifacts/
+          if-no-files-found: warn
+          retention-days: 30

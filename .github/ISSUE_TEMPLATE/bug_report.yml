@@ -1,0 +1,115 @@
+name: Bug report
+description: Something in the .NET client behaves incorrectly, or differently from the upstream Go client.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+
+        - This project is an **unofficial community port** of the Oxia Go client. A bug in the Oxia **server**, or in the Go client, belongs to [oxia-db/oxia](https://github.com/oxia-db/oxia/issues).
+        - **Security vulnerabilities must not be reported here.** Use [private vulnerability reporting](https://github.com/danrubAtPlanview/oxia.net/security/advisories/new) (see `SECURITY.md`).
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you start
+      options:
+        - label: I searched the existing issues and discussions.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: A clear description of the bug. State the **expected** behaviour and the **actual** behaviour.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal, self-contained C# snippet (client options, the calls you make, the keys involved) is the most useful thing you can give us.
+      render: csharp
+    validations:
+      required: true
+
+  - type: dropdown
+    id: go-parity
+    attributes:
+      label: Does the Go client behave differently in the same scenario?
+      description: This port aims to be behaviourally identical to the Go client, so a difference is a bug even if the .NET behaviour looks reasonable.
+      options:
+        - I did not check
+        - Yes, the Go client behaves differently
+        - No, the Go client behaves the same
+        - Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: client-version
+    attributes:
+      label: Client version
+      description: The commit hash or tag of oxia.net you built (`git rev-parse HEAD`), or the package version once published.
+      placeholder: "e.g. 1a2b3c4 or v0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: dotnet-version
+    attributes:
+      label: .NET runtime and SDK
+      description: Output of `dotnet --info` (runtime and SDK versions).
+      placeholder: "e.g. .NET 10.0.x / SDK 10.0.400"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "e.g. Windows 11, Ubuntu 24.04, macOS 15"
+    validations:
+      required: true
+
+  - type: input
+    id: server-version
+    attributes:
+      label: Oxia server version
+      description: Output of `oxia --version`, or the image tag / digest.
+      placeholder: "e.g. oxia/oxia:nightly-beta, or commit 8456f61"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Server deployment
+      options:
+        - Standalone (single process)
+        - Cluster (coordinator + data servers)
+        - Kubernetes / Helm
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Client configuration
+      description: The client options you pass (batch linger, namespace, TLS, authentication, session timeout, ...). Remove any secrets.
+      render: csharp
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and stack trace
+      description: |
+        The exception, with its inner exceptions. If you enabled logging (`OxiaLog.Factory`), include the relevant lines.
+        **Remove tokens, credentials and anything confidential before pasting.**
+      render: text

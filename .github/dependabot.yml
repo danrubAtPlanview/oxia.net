@@ -1,0 +1,41 @@
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# NuGet versions are centrally managed in Directory.Packages.props. Wire-level dependencies (Grpc.*, Google.Protobuf) are grouped so
+# that they move together and are reviewed with the integration suite in mind.
+version: 2
+updates:
+  - package-ecosystem: "nuget"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    groups:
+      grpc-protobuf:
+        patterns:
+          - "Grpc.*"
+          - "Google.Protobuf"
+      dotnet-runtime-packages:
+        patterns:
+          - "Microsoft.Extensions.*"
+          - "System.IO.Hashing"
+      test-tooling:
+        patterns:
+          - "xunit*"
+          - "Microsoft.NET.Test.Sdk"
+      benchmarks:
+        patterns:
+          - "BenchmarkDotNet*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

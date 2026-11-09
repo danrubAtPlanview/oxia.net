@@ -1,7 +1,7 @@
 # oxia.net — design contract for the port
 
 .NET 10 / C# 14 port of the **Oxia Go client** (`github.com/oxia-db/oxia`, module `oxia/` + the parts of `common/` it uses).
-Upstream reference checkout (read-only): `C:\Work-Experimental\oxia-go-ref`, pinned at commit
+Upstream reference checkout (read-only; any clone of `github.com/oxia-db/oxia`), pinned at commit
 `8456f61e1ada7b786f5ef17798b45fbc17d0d246`.
 
 ## Goals (in priority order)
