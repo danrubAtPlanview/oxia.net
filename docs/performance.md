@@ -34,7 +34,7 @@ adds loopback latency), so every figure is the **median of 3 runs interleaved** 
 
 ```
 # .NET client against a fresh server in the reusable container; add --go to run the Go client on the same workload afterwards
-dotnet run -c Release --project benchmarks/Oxia.Client.Benchmarks -- load --server docker --ops put,get --producers 256 --linger 5ms --duration 8s --go C:\Work-Experimental\oxia-load-build\oxia-load.exe
+dotnet run -c Release --project benchmarks/Oxia.Client.Benchmarks -- load --server docker --ops put,get --producers 256 --linger 5ms --duration 8s --go <path-to>/oxia-load.exe
 pwsh benchmarks/Oxia.Client.Benchmarks/Load/go/build.ps1          # builds the Go twin (oxia-load.exe) from the pinned checkout, outside the repo
 dotnet run -c Release --project benchmarks/Oxia.Client.Benchmarks -- load --server echo-proc ...   # CPU-bound: echo server in a child process
 dotnet run -c Release --project benchmarks/Oxia.Client.Benchmarks -- load ... --alloc-profile        # allocated bytes per operation by type
