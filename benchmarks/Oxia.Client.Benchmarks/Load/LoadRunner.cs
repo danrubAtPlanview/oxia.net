@@ -180,12 +180,16 @@ internal sealed class LoadRunner
         r.Add("workitems_per_op", (s1.WorkItems - s0.WorkItems) / opsD, "0.00");
         r.Add("lock_contentions", s1.Contentions - s0.Contentions);
         r.Add("threads", s1.Threads);
+        // The measured window as epoch milliseconds (same keys, same place in the Go twin): the AWS benchmark aligns the server side CPU
+        // sampler (bench/aws/node/oxia-server.sh stats --since/--until) with it.
+        r.Add("window_start_ms", s0.EpochMs);
+        r.Add("window_end_ms", s0.EpochMs + (long)Math.Round(window * 1000));
         _ = seconds;
         return r;
     }
 
     private readonly record struct Snapshot(long Timestamp, TimeSpan Cpu, long Allocated, int Gc0, int Gc1, int Gc2, long WorkItems, long Contentions,
-        int Threads, double? ServerCpu);
+        int Threads, double? ServerCpu, long EpochMs);
 
     private static async Task<Snapshot> TakeAsync(LoadServer server)
     {
@@ -193,7 +197,7 @@ internal sealed class LoadRunner
         using var self = Process.GetCurrentProcess();
         return new Snapshot(Stopwatch.GetTimestamp(), self.TotalProcessorTime, GC.GetTotalAllocatedBytes(true), GC.CollectionCount(0),
             GC.CollectionCount(1), GC.CollectionCount(2), ThreadPool.CompletedWorkItemCount, Monitor.LockContentionCount, ThreadPool.ThreadCount,
-            serverCpu);
+            serverCpu, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
     }
 
     // ---------------------------------------------------------------------------------------------------------------------

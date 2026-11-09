@@ -415,8 +415,11 @@ func run(c config) error {
 			fmt.Printf(" %s_p50_us=%.0f %s_p99_us=%.0f", names[k], us(total[k].Quantile(0.5)), names[k], us(total[k].Quantile(0.99)))
 		}
 	}
-	fmt.Printf(" cpu_s=%.2f cpu_us_per_op=%.2f gc0=%d alloc_bytes_per_op=%.0f goroutines=%d\n",
-		cpuSecs, cpuSecs*1e6/float64(max64(all, 1)), gcs, float64(allocBytes)/float64(max64(all, 1)), runtime.NumGoroutine())
+	// window_start_ms / window_end_ms: the measured window as epoch milliseconds, so that the server side CPU sampler of the AWS benchmark
+	// (bench/aws/node/oxia-server.sh stats --since/--until) can be aligned with it exactly.  Same keys, same place, in the .NET tool.
+	fmt.Printf(" cpu_s=%.2f cpu_us_per_op=%.2f gc0=%d alloc_bytes_per_op=%.0f goroutines=%d window_start_ms=%d window_end_ms=%d\n",
+		cpuSecs, cpuSecs*1e6/float64(max64(all, 1)), gcs, float64(allocBytes)/float64(max64(all, 1)), runtime.NumGoroutine(),
+		measureStart.UnixMilli(), stop.UnixMilli())
 	return nil
 }
 

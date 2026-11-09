@@ -1,0 +1,2 @@
+# Node-side scripts run on Linux (Amazon Linux 2023 / containers): a CRLF checkout on Windows would break the shebang.
+*.sh text eol=lf
