@@ -178,6 +178,8 @@ function Find-Leftovers {
     foreach ($v in @($sg)) { if ($v) { $left.Add("security group $v") } }
     $igw = Invoke-Aws ec2 describe-internet-gateways @(Get-TaggedFilter $RunId) --query 'InternetGateways[].InternetGatewayId' -Json -AllowFail
     foreach ($v in @($igw)) { if ($v) { $left.Add("internet gateway $v") } }
+    $vpce = Invoke-Aws ec2 describe-vpc-endpoints @(Get-TaggedFilter $RunId) --query 'VpcEndpoints[?State!=`deleted` && State!=`deleting`].VpcEndpointId' -Json -AllowFail
+    foreach ($v in @($vpce)) { if ($v) { $left.Add("vpc endpoint $v") } }
     $pg = Invoke-Aws ec2 describe-placement-groups @(Get-TaggedFilter $RunId) --query 'PlacementGroups[].GroupName' -Json -AllowFail
     foreach ($v in @($pg)) { if ($v) { $left.Add("placement group $v") } }
 
@@ -191,7 +193,7 @@ function Find-Leftovers {
 
     # catch-all through the tagging API (instances excluded: terminated instances stay visible for a while)
     $tagged = Invoke-Aws resourcegroupstaggingapi get-resources --tag-filters "Key=oxia-bench-run,Values=$RunId" --query 'ResourceTagMappingList[].ResourceARN' -Json -AllowFail
-    foreach ($arn in @($tagged)) { if ($arn -and $arn -notmatch ':instance/' -and ($left -notmatch [regex]::Escape(($arn -split '[/:]')[-1]))) { $left.Add("tagged resource $arn") } }
+    foreach ($arn in @($tagged)) { if ($arn -and $arn -notmatch ':(instance|volume|vpc-endpoint)/' -and ($left -notmatch [regex]::Escape(($arn -split '[/:]')[-1]))) { $left.Add("tagged resource $arn") } }
     return @($left)
 }
 
@@ -209,12 +211,24 @@ function Remove-OrphansByTag {
         Invoke-Aws ec2 wait instance-terminated --instance-ids @($ids) -AllowFail | Out-Null
     }
     foreach ($v in @(Invoke-Aws ec2 describe-volumes @f --query 'Volumes[].VolumeId' -Json -AllowFail)) {
-        if ($v) { Invoke-Aws ec2 delete-volume --volume-id $v -AllowFail | Out-Null }
+        if (-not $v) { continue }
+        # a volume of a terminated instance stays 'in-use' for a few more seconds
+        for ($i = 0; $i -lt 30; $i++) {
+            if ($null -ne (Invoke-Aws ec2 delete-volume --volume-id $v -AllowFail)) { break }
+            if ($script:LastAwsError -match 'InvalidVolume.NotFound') { break }
+            Start-Sleep -Seconds 4
+        }
     }
     foreach ($vpcId in @(Invoke-Aws ec2 describe-vpcs @f --query 'Vpcs[].VpcId' -Json -AllowFail)) {
         if (-not $vpcId) { continue }
-        foreach ($e in @(Invoke-Aws ec2 describe-vpc-endpoints --filters "Name=vpc-id,Values=$vpcId" --query 'VpcEndpoints[].VpcEndpointId' -Json -AllowFail)) {
+        foreach ($e in @(Invoke-Aws ec2 describe-vpc-endpoints --filters "Name=vpc-id,Values=$vpcId" --query 'VpcEndpoints[?State!=`deleted`].VpcEndpointId' -Json -AllowFail)) {
             if ($e) { Invoke-Aws ec2 delete-vpc-endpoints --vpc-endpoint-ids $e -AllowFail | Out-Null }
+        }
+        # endpoint deletion is asynchronous and the VPC cannot go before it
+        for ($i = 0; $i -lt 30; $i++) {
+            $remaining = @(Invoke-Aws ec2 describe-vpc-endpoints --filters "Name=vpc-id,Values=$vpcId" --query 'VpcEndpoints[?State!=`deleted`].VpcEndpointId' -Json -AllowFail) | Where-Object { $_ }
+            if (@($remaining).Count -eq 0) { break }
+            Start-Sleep -Seconds 4
         }
         foreach ($n in @(Invoke-Aws ec2 describe-network-interfaces --filters "Name=vpc-id,Values=$vpcId" --query 'NetworkInterfaces[].NetworkInterfaceId' -Json -AllowFail)) {
             if ($n) { Invoke-Aws ec2 delete-network-interface --network-interface-id $n -AllowFail | Out-Null }
@@ -247,7 +261,11 @@ function Remove-OrphansByTag {
                 Invoke-Aws ec2 delete-internet-gateway --internet-gateway-id $g -AllowFail | Out-Null
             }
         }
-        Invoke-Aws ec2 delete-vpc --vpc-id $vpcId -AllowFail | Out-Null
+        for ($i = 0; $i -lt 15; $i++) {
+            if ($null -ne (Invoke-Aws ec2 delete-vpc --vpc-id $vpcId -AllowFail)) { break }
+            if ($script:LastAwsError -match 'InvalidVpcID.NotFound') { break }
+            Start-Sleep -Seconds 6
+        }
     }
     foreach ($g in @(Invoke-Aws ec2 describe-internet-gateways @f --query 'InternetGateways[].InternetGatewayId' -Json -AllowFail)) {
         if ($g) { Invoke-Aws ec2 delete-internet-gateway --internet-gateway-id $g -AllowFail | Out-Null }
