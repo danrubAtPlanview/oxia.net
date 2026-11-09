@@ -33,7 +33,10 @@ n=0
 for f in oxia oxia-load-dotnet oxia-load-go VERSIONS.json SHA256SUMS "$src"/ld-musl-*.so.1 "$src"/node/*.sh; do
   [[ $f == /* ]] || f=$src/$f
   [[ -f $f ]] || continue
-  install -m 0755 "$f" "$dest/$(basename "$f")"
+  case $f in
+    *.json | */SHA256SUMS) install -m 0644 "$f" "$dest/$(basename "$f")" ;;
+    *) install -m 0755 "$f" "$dest/$(basename "$f")" ;;
+  esac
   n=$((n + 1))
 done
 ((n > 0)) || die "nothing to install in $src"

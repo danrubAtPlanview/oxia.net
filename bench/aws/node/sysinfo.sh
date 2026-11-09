@@ -87,7 +87,7 @@ data_json=null
 if [[ -d $OXIA_BENCH_DATA ]]; then
   read -r df_dev df_size df_mount < <(df -P -B1G "$OXIA_BENCH_DATA" | awk 'NR == 2 { print $1, $2, $6 }') || true
   fstype=$(findmnt -n -o FSTYPE --target "$OXIA_BENCH_DATA" 2>/dev/null || true)
-  options=$(findmnt -n -o OPTIONS --target "$OXIA_BENCH_DATA" 2>/dev/null || true)
+  options=$(findmnt -n -o OPTIONS --target "$OXIA_BENCH_DATA" 2>/dev/null | cut -c1-160 || true)
   data_json=$(jq -n --arg mount "${df_mount:-}" --arg dev "${df_dev:-}" --arg fs "$fstype" --arg opt "$options" --arg size "${df_size:-0}" \
     '{mount: $mount, device: $dev, fstype: $fs, options: $opt, size_gb: ($size | tonumber? // null)}')
 fi
@@ -102,7 +102,7 @@ fi
 dotnet_sha="" go_sha="" versions_json=null
 if p=$(find_bin oxia-load-dotnet); then dotnet_sha=$(sha "$p"); fi
 if p=$(find_bin oxia-load-go); then go_sha=$(sha "$p"); fi
-if p=$(find_bin VERSIONS.json); then versions_json=$(jq -c . "$p" 2>/dev/null || echo null); fi
+if p=$(find_bin VERSIONS.json); then versions_json=$(jq -c 'del(.files)' "$p" 2>/dev/null || echo null); fi
 software_json=$(jq -n --arg ov "$oxia_version" --arg os "$oxia_sha" --arg ds "$dotnet_sha" --arg gs "$go_sha" --argjson versions "$versions_json" \
   '{oxia: {version: $ov, sha256: $os}, oxia_load_dotnet: {sha256: $ds}, oxia_load_go: {sha256: $gs}, artifacts: $versions}')
 

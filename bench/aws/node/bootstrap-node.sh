@@ -6,7 +6,7 @@
 # tuning that cannot be applied is logged ("skipped") and recorded in node.json, and the script still succeeds.
 #
 # What it does
-#   * installs jq, procps-ng (ps/pgrep), util-linux (setsid/lscpu) and curl when missing
+#   * installs jq, procps-ng (ps/pgrep) and util-linux (setsid/lscpu) when missing
 #   * sysctl (live and persisted in /etc/sysctl.d/99-oxia-bench.conf):
 #       net.core.somaxconn=4096  net.ipv4.tcp_max_syn_backlog=8192  net.core.netdev_max_backlog=16384  fs.file-max=2097152
 #       vm.swappiness=1  vm.max_map_count=1048576
@@ -50,16 +50,20 @@ pkg_manager() {
   fi
 }
 
-pm_install() { # pm_install MANAGER PACKAGES...
-  local pm=$1
+pm_install() { # pm_install MANAGER PACKAGES... ; the package manager's output is shown only when it fails
+  local pm=$1 out rc=0
   shift
+  out=$(mktemp)
   case $pm in
-    dnf | yum) "$pm" install -y --setopt=install_weak_deps=False "$@" >&2 ;;
+    dnf | yum) "$pm" install -y -q --setopt=install_weak_deps=False "$@" >"$out" 2>&1 || rc=$? ;;
     apt)
       export DEBIAN_FRONTEND=noninteractive
-      apt-get update -qq >&2 && apt-get install -y -qq --no-install-recommends "$@" >&2
+      { apt-get update -qq && apt-get install -y -qq --no-install-recommends "$@"; } >"$out" 2>&1 || rc=$?
       ;;
   esac
+  if ((rc != 0)); then tail -n 20 "$out" >&2; fi
+  rm -f "$out"
+  return "$rc"
 }
 
 install_packages() {
@@ -117,10 +121,7 @@ SYSCTLS=(
 
 apply_sysctls() {
   local conf=/etc/sysctl.d/99-oxia-bench.conf kv key want path cur
-  {
-    echo "# written by oxia-bench bootstrap-node.sh"
-    printf '%s\n' "${SYSCTLS[@]}"
-  } >"$conf" 2>/dev/null || warn "cannot write $conf"
+  write_file "$conf" "# written by oxia-bench bootstrap-node.sh" "${SYSCTLS[@]}" || warn "cannot write $conf"
   for kv in "${SYSCTLS[@]}"; do
     key=${kv%%=*} want=${kv#*=}
     path=/proc/sys/${key//.//}
@@ -131,7 +132,7 @@ apply_sysctls() {
     cur=$(<"$path")
     if [[ $cur == "$want" ]]; then
       applied "sysctl $key=$want (already)"
-    elif echo "$want" >"$path" 2>/dev/null; then
+    elif { echo "$want" >"$path"; } 2>/dev/null; then
       applied "sysctl $key=$want (was $cur)"
     else
       skipped "sysctl $key=$want (read-only /proc/sys; is $cur)"
@@ -170,7 +171,7 @@ apply_thp() {
     cur=$(<"$base/$f")
     if [[ $cur == *"[never]"* ]]; then
       applied "thp $f=never (already)"
-    elif echo never >"$base/$f" 2>/dev/null; then
+    elif { echo never >"$base/$f"; } 2>/dev/null; then
       applied "thp $f=never (was ${cur})"
     else
       skipped "thp $f=never (read-only /sys; is ${cur})"

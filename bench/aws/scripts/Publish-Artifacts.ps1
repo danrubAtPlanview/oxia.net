@@ -271,7 +271,7 @@ if (-not $SkipVerify) {
         $script = @'
 set -e
 . /art/node/lib.sh
-ensure_musl_loader /art/oxia >&2
+ensure_musl_loader /art/oxia >/tmp/musl.log 2>&1
 echo "OXIA_VERSION_BEGIN"
 /art/oxia --version
 echo "OXIA_VERSION_END"
