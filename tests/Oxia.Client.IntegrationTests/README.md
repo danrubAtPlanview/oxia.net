@@ -29,6 +29,8 @@ The first run pulls `oxia/oxia:nightly-beta` (~50 MB) if it is missing and creat
 | `OXIA_TEST_MEMORY` / `OXIA_TEST_CPUS` | `3g` / no limit | `docker run --memory` / `--cpus` of the containers. |
 | `OXIA_TEST_SKIP_IF_NO_SERVER` | unset | `1` = skip (instead of fail) the tests when neither Docker nor `OXIA_TEST_ADDRESS` is available. |
 | `OXIA_TEST_VERBOSE` | unset | `1` = print every docker command, with timings, to stderr. |
+| `OXIA_TEST_HOST` | `127.0.0.1` | Host name/address under which the **test process** reaches the published container ports. Right as is whenever the test process runs on the machine that runs the Docker daemon (Windows, macOS, native Linux, the GitHub `ubuntu-latest` runner). Set it when the test process itself runs in a Linux container that uses the host's daemon through its socket (Docker Desktop: `host.docker.internal`). The generated TLS certificates get this name as a SAN. See `docs/linux-validation.md`. |
+| `OXIA_TEST_CONTAINER_HOST` | unset (detect) | How the processes **inside** the Oxia containers reach the test process (the OIDC provider of the security tests): detected as `host.docker.internal` when it resolves in the container, else the container's default gateway (native Linux: `docker0`). `gateway` forces the gateway (test process in a host-network container of Docker Desktop's VM); any other value is used as is. |
 
 Clean up everything the fixture created (only containers labelled `oxia.net.tests=1` are touched):
 
@@ -144,6 +146,14 @@ Helpers (`Oxia.TestSupport.TestUtil`): `Eventually` / `EventuallyWithT` (testify
 `Receive` / `Recv` / `ReceiveWithin` / `TryReceive` / `IsEmpty` / `DrainAsync` (Go channel idioms on `ChannelReader<T>`),
 `CatchAsync` / `AssertErrorIs`, `RandomString`, `Sharding.ShardOf`. `RawOxia` offers raw gRPC put/get/assignments that do not
 depend on the library under test.
+
+## Linux
+
+The suite (unit and integration, 119 integration tests with the cluster profile) was run on Linux; see [`docs/linux-validation.md`](../../docs/linux-validation.md).
+On a Linux machine with Docker (a GitHub `ubuntu-latest` runner, an AWS instance) nothing has to be configured: `dotnet test tests/Oxia.Client.IntegrationTests -c Release`
+(add `OXIA_TEST_CLUSTER=1` for the coordinator tests). Published ports are reached as `127.0.0.1:<port>`, and the OIDC provider of the security tests is reached from the
+containers through the default gateway (`docker0`) because `host.docker.internal` does not resolve there. Clean up with `tests/Oxia.TestSupport/scripts/clean-oxia-containers.sh`.
+If the test process itself runs in a container that talks to the host's daemon (a devcontainer, Docker Desktop), set `OXIA_TEST_HOST` (and `OXIA_TEST_CONTAINER_HOST=gateway`).
 
 ## Troubleshooting
 

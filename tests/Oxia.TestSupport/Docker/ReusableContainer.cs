@@ -8,7 +8,7 @@
 //              process, so killed children are reaped); the fixtures start/stop Oxia processes inside it with `docker exec`.
 //              Ports are published on 127.0.0.1 with EPHEMERAL host ports (collision free); `docker port` is read after every
 //              start because Docker may re-assign them.  Only containers labelled oxia.net.tests=1 are ever touched.
-//   Divergences: n/a (new code).
+//   Divergences: n/a (new code).  Linux validation: ExecScriptAsync always sends LF (C# raw strings take the source file's line endings).
 // =====================================================================================================================
 using System.Globalization;
 using System.Security.Cryptography;
@@ -121,8 +121,13 @@ internal sealed class ReusableContainer
     {
         var command = new List<string> { "exec", "-i", Name, "sh", "-s", "--" };
         command.AddRange(args);
-        return DockerCli.RunAsync(command, script, timeout, ct);
+        // C# raw string literals keep the line endings of the SOURCE file: a checkout with core.autocrlf=true (Windows default) turns the
+        // embedded scripts into CRLF, and `sh` would see a '\r' at the end of every command.  Always send LF.
+        return DockerCli.RunAsync(command, NormalizeLineEndings(script), timeout, ct);
     }
+
+    /// <summary>CRLF to LF: the container's shell must never see a carriage return.</summary>
+    internal static string NormalizeLineEndings(string script) => script.Replace("\r\n", "\n", StringComparison.Ordinal);
 
     public Task<DockerResult> ExecAsync(IEnumerable<string> command, TimeSpan? timeout = null, CancellationToken ct = default)
     {

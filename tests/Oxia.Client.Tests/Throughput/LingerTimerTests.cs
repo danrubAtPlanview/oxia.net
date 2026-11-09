@@ -5,6 +5,8 @@
 //   Intent   : The wake-up service of the batchers (high resolution timer on Windows): a wake-up never comes before its deadline, comes
 //              soon after it (the whole point: a 5 ms deadline must not become 15 ms), re-arming supersedes, cancel drops, many timers
 //              fire in deadline order, and a throwing callback does not kill the service.
+//              Linux validation (L): the `highResolution: true` case is a dynamic skip off Windows (it used to return = a vacuous pass); the
+//              portable (Monitor.Wait) path that Linux / macOS run in production is asserted for promptness in LingerTimerPortableTests.
 // =====================================================================================================================
 using System.Diagnostics;
 using Oxia.Client.Batch;
@@ -44,7 +46,8 @@ public class LingerTimerTests
     [InlineData(false)]
     public void WakeUp_NeverBeforeTheDeadline_AndPromptlyAfter(bool highResolution)
     {
-        if (highResolution && !OperatingSystem.IsWindows()) return; // the portable path is what runs elsewhere
+        // the portable path is what runs elsewhere: LingerTimerPortableTests asserts its promptness there (this used to `return` = a vacuous pass)
+        Assert.SkipWhen(highResolution && !OperatingSystem.IsWindows(), "the high resolution (waitable timer) path exists on Windows only; see LingerTimerPortableTests for Linux / macOS");
         var service = new LingerTimerService(highResolution);
         var probe = new Probe(service);
 

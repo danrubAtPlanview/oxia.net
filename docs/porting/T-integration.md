@@ -36,7 +36,8 @@ Not ported: see "Out of scope / follow-ups".
 | `oxiad/common/sharding/shards.go` | `tests/Oxia.TestSupport/Sharding.cs` | ported | `GenerateShards`, `shardOf`. |
 | testify `assert.Eventually`, Go channel idioms | `tests/Oxia.TestSupport/TestUtil.cs` | new | `Eventually`, `EventuallyWithT`, `Receive`/`ReceiveWithin`/`TryReceive`, `RandomString`, ... |
 | env configuration | `tests/Oxia.TestSupport/IntegrationEnv.cs` | new | `OXIA_TEST_*`. |
-| (cleanup) | `tests/Oxia.TestSupport/scripts/clean-oxia-containers.ps1` | new | Removes `oxia.net.tests=1` containers. |
+| (cleanup) | `tests/Oxia.TestSupport/scripts/clean-oxia-containers.ps1`, `clean-oxia-containers.sh` | new | Removes `oxia.net.tests=1` containers (the `.sh` twin is for Linux / macOS / CI). |
+| (Linux validation) | `IntegrationEnv.Host` (`OXIA_TEST_HOST`), `IntegrationEnv.ContainerHost` (`OXIA_TEST_CONTAINER_HOST`), `ReusableContainer.NormalizeLineEndings` | changed | The fixtures no longer hard-code `127.0.0.1` for the published ports (a test process in a Linux container on Docker Desktop reaches them as `host.docker.internal`), the OIDC callback host can be forced to the default gateway, TestPki adds the configured host as a SAN, and the `sh -s` scripts are always sent with LF. Details: [`docs/linux-validation.md`](../linux-validation.md). |
 | fixture self tests | `tests/Oxia.Client.IntegrationTests/Infrastructure/OxiaServerFixtureTests.Extra.cs`, `OxiaClusterFixtureTests.Extra.cs` | new | Raw-gRPC tests of the fixtures (empty server per start, profile applied, 4 concurrent servers, leader election and follower rejection with leader hint, stop all servers). Pass against Docker today. |
 
 ## Out of scope / follow-ups

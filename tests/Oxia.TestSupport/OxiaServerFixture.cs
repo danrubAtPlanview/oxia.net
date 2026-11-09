@@ -18,6 +18,8 @@
 //              ephemeral host port (docker `-p 127.0.0.1::<port>`) is all that is needed: the leader address the client
 //              receives is the address it already reaches.  OXIA_TEST_ADDRESS bypasses Docker for an external server.
 //   Divergences: see tests/Oxia.Client.IntegrationTests/README.md ("Why one container with slots instead of a container per profile").
+//              Linux validation: the address handed to the clients is `{OXIA_TEST_HOST}:{published port}` (default 127.0.0.1); only a test
+//              process that itself runs in a container on Docker Desktop has to change it (host.docker.internal) -- docs/linux-validation.md.
 // =====================================================================================================================
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -162,7 +164,7 @@ public sealed class OxiaServerFixture : IAsyncLifetime
         try
         {
             slot = await LockAndStartAsync(container, profile, ct).ConfigureAwait(false);
-            var address = $"127.0.0.1:{container.HostPorts[BaseContainerPort + slot]}";
+            var address = $"{IntegrationEnv.Host}:{container.HostPorts[BaseContainerPort + slot]}";
             var healthSlot = slot;
             await OxiaReadiness.WaitUntilReadyAsync(address, profile.Shards, TimeSpan.FromSeconds(60), "default",
                 () => HealthCheckAsync(container, healthSlot), () => GetSlotLogAsync(healthSlot), ct).ConfigureAwait(false);

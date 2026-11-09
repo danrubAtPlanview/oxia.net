@@ -17,6 +17,8 @@
 //              and files written to /data/cluster<slot>/files, e.g. TLS certificates and OIDC key files); a cluster started with a profile is
 //              NOT opt-in (OXIA_TEST_CLUSTER), because `oxia standalone` has no TLS / auth flags and this is the only way to test them.
 //              GetHostAddressAsync tells how the container reaches the test host (for an OIDC provider hosted by the test process).
+//              Linux validation: the servers' public addresses are `{OXIA_TEST_HOST}:{published port}` (default 127.0.0.1) and
+//              OXIA_TEST_CONTAINER_HOST overrides / forces ("gateway") the way GetHostAddressAsync reaches the test host -- docs/linux-validation.md.
 // =====================================================================================================================
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -220,7 +222,7 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
         {
             slot = await LockAndStartAsync(container, name, serverCount, replicationFactor, initialShardCount, extraAuthority, ct, profile).ConfigureAwait(false);
             var servers = Enumerable.Range(0, serverCount)
-                .Select(i => new ClusterServer($"{name}-s{i + 1}", i, $"127.0.0.1:{container.HostPorts[PublicPort(slot, i)]}", $"127.0.0.1:{InternalPort(slot, i)}"))
+                .Select(i => new ClusterServer($"{name}-s{i + 1}", i, $"{IntegrationEnv.Host}:{container.HostPorts[PublicPort(slot, i)]}", $"127.0.0.1:{InternalPort(slot, i)}"))
                 .ToList();
             var cluster = new OxiaCluster(this, slot, name, extraAuthority, servers, initialShardCount, profile?.Probe);
             var healthSlot = slot;
@@ -306,7 +308,7 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
         yaml.Append("servers:\n");
         for (var s = 0; s < serverCount; s++)
         {
-            yaml.Append(CultureInfo.InvariantCulture, $"  - name: {name}-s{s + 1}\n    public: 127.0.0.1:{container.HostPorts[PublicPort(c, s)]}\n    internal: 127.0.0.1:{InternalPort(c, s)}\n");
+            yaml.Append(CultureInfo.InvariantCulture, $"  - name: {name}-s{s + 1}\n    public: {IntegrationEnv.Host}:{container.HostPorts[PublicPort(c, s)]}\n    internal: 127.0.0.1:{InternalPort(c, s)}\n");
         }
 
         if (extraAuthority is not null) yaml.Append(CultureInfo.InvariantCulture, $"allowExtraAuthorities:\n  - {extraAuthority}\n");
@@ -410,10 +412,14 @@ public sealed class OxiaClusterFixture : IAsyncLifetime
     /// </summary>
     public async Task<string> GetHostAddressAsync(CancellationToken ct = default)
     {
+        // OXIA_TEST_CONTAINER_HOST: an explicit address, or "gateway" to skip the host.docker.internal lookup (see IntegrationEnv.ContainerHost)
+        if (IntegrationEnv.ContainerHost is { } configured && !configured.Equals("gateway", StringComparison.OrdinalIgnoreCase)) return configured;
+
         var container = await EnsureContainerAsync(ct).ConfigureAwait(false);
-        var r = await container.ExecAsync(["sh", "-c",
-            "if getent hosts host.docker.internal >/dev/null 2>&1; then echo host.docker.internal; else ip route | awk '/^default/ {print $3; exit}'; fi"],
-            TimeSpan.FromSeconds(20), ct).ConfigureAwait(false);
+        var lookup = IntegrationEnv.ContainerHost is null
+            ? "if getent hosts host.docker.internal >/dev/null 2>&1; then echo host.docker.internal; else ip route | awk '/^default/ {print $3; exit}'; fi"
+            : "ip route | awk '/^default/ {print $3; exit}'";
+        var r = await container.ExecAsync(["sh", "-c", lookup], TimeSpan.FromSeconds(20), ct).ConfigureAwait(false);
         var host = r.StdOut.Trim();
         if (!r.Ok || host.Length == 0) throw new DockerException("could not determine how the cluster container reaches the host: " + r.Combined);
         return host;
