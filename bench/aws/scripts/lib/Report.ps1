@@ -21,6 +21,21 @@ function Get-Val($Obj, [string]$Name, $Default = $null) {
     return $p.Value
 }
 
+function Get-Path($Obj, [string]$Path) {
+    $cur = $Obj
+    foreach ($seg in $Path -split '\.') {
+        if ($null -eq $cur) { return $null }
+        $cur = Get-Val $cur $seg
+    }
+    return $cur
+}
+
+# one-line, pipe-safe Markdown table cell
+function Format-Cell($v) {
+    if ($null -eq $v -or [string]$v -eq '') { return 'n/a' }
+    return (([string]$v -replace '\s+', ' ').Trim() -replace '\|', '\|')
+}
+
 function Format-Num($v, [string]$Fmt = 'N0') { if ($null -eq $v) { return 'n/a' } return ([double]$v).ToString($Fmt, [Globalization.CultureInfo]::InvariantCulture) }
 function Format-Ms($us) { if ($null -eq $us) { return 'n/a' } return (([double]$us) / 1000.0).ToString('N2', [Globalization.CultureInfo]::InvariantCulture) }
 
@@ -69,32 +84,35 @@ function New-Report {
     if ($env) {
         $null = $sb.AppendLine("## Environment")
         $null = $sb.AppendLine()
-        $null = $sb.AppendLine("| | |")
-        $null = $sb.AppendLine("|---|---|")
-        foreach ($k in 'region', 'availabilityZone', 'arch', 'serverInstanceType', 'clientInstanceType', 'ami', 'placementGroup', 'serverPrivateIp') {
-            $v = Get-Val $env $k
-            if ($null -ne $v) { $null = $sb.AppendLine("| $k | $v |") }
-        }
-        foreach ($role in 'server', 'client') {
-            $n = Get-Val $env $role
-            if ($n) {
-                foreach ($p in $n.PSObject.Properties) {
-                    if ($p.Value -is [string] -or $p.Value -is [ValueType]) { $null = $sb.AppendLine("| $role.$($p.Name) | $($p.Value) |") }
-                }
-            }
-        }
+        $srv = Get-Val $env 'server'; $cli = Get-Val $env 'client'
+        $null = $sb.AppendLine("| | Server | Client |")
+        $null = $sb.AppendLine("|---|---|---|")
+        $rows = @(
+            @('instance type', (Get-Val $env 'serverInstanceType'), (Get-Val $env 'clientInstanceType')),
+            @('OS', (Get-Path $srv 'os.pretty_name'), (Get-Path $cli 'os.pretty_name')),
+            @('kernel', (Get-Path $srv 'os.kernel'), (Get-Path $cli 'os.kernel')),
+            @('CPU', ("{0} ({1} vCPU)" -f (Get-Path $srv 'cpu.model'), (Get-Path $srv 'cpu.logical_cpus')), ("{0} ({1} vCPU)" -f (Get-Path $cli 'cpu.model'), (Get-Path $cli 'cpu.logical_cpus'))),
+            @('memory', ("{0} MiB" -f (Get-Path $srv 'memory.total_mb')), ("{0} MiB" -f (Get-Path $cli 'memory.total_mb'))),
+            @('transparent huge pages / swappiness', ("{0} / {1}" -f (Get-Path $srv 'memory.thp_enabled'), (Get-Path $srv 'memory.swappiness')), ("{0} / {1}" -f (Get-Path $cli 'memory.thp_enabled'), (Get-Path $cli 'memory.swappiness'))),
+            @('data volume', ("{0} {1} {2} GB" -f (Get-Path $srv 'data_volume.device'), (Get-Path $srv 'data_volume.fstype'), (Get-Path $srv 'data_volume.size_gb')), 'n/a')
+        )
+        foreach ($r in $rows) { $null = $sb.AppendLine("| $(Format-Cell $r[0]) | $(Format-Cell $r[1]) | $(Format-Cell $r[2]) |") }
+        $null = $sb.AppendLine()
         $ver = Get-Val $env 'versions'
-        if ($ver) {
-            foreach ($p in $ver.PSObject.Properties) {
-                if ($p.Name -eq 'files') { continue }
-                if ($p.Value -is [string] -or $p.Value -is [ValueType]) { $null = $sb.AppendLine("| versions.$($p.Name) | $($p.Value) |") }
-                elseif ($p.Value) {
-                    foreach ($q in $p.Value.PSObject.Properties) {
-                        if ($q.Value -is [string] -or $q.Value -is [ValueType]) { $null = $sb.AppendLine("| versions.$($p.Name).$($q.Name) | $($q.Value) |") }
-                    }
-                }
-            }
-        }
+        $null = $sb.AppendLine("| Component | Version |")
+        $null = $sb.AppendLine("|---|---|")
+        $commit = [string](Get-Path $ver 'client.commit')
+        $shortCommit = if ($commit.Length -ge 12) { $commit.Substring(0, 12) } else { $commit }
+        $oxiaFirst = ([string](Get-Path $ver 'oxia.version_output') -split "`n" | Select-Object -First 1).Trim()
+        $oxiaGo = ([string](Get-Path $ver 'oxia.version_output') -split "`n" | Where-Object { $_ -match 'go:' } | Select-Object -First 1)
+        $sw = @(
+            @('.NET client (this repository)', ("commit ``{0}``, working tree dirty: {1}" -f $shortCommit, (Get-Path $ver 'client.dirty'))),
+            @('.NET runtime / settings', ("{0}, self-contained single file; {1}" -f (Get-Path $ver 'dotnet.runtime'), (Get-Path $ver 'dotnet.settings_in_effect'))),
+            @('Go client', ("{0} (CGO off), built from github.com/oxia-db/oxia at ``{1}``" -f (Get-Path $ver 'go.version'), ([string](Get-Path $ver 'go.ref_commit')).Substring(0, [math]::Min(12, ([string](Get-Path $ver 'go.ref_commit')).Length)))),
+            @('Oxia server', ("{0}; {1}; image ``{2}``" -f $oxiaFirst, $oxiaGo, (Get-Path $ver 'oxia.image_digest'))),
+            @('Region / AZ / AMI', ("{0} / {1} / {2}; cluster placement group: {3}" -f (Get-Val $env 'region'), (Get-Val $env 'availabilityZone'), (Get-Val $env 'ami'), (Get-Val $env 'placementGroup')))
+        )
+        foreach ($r in $sw) { $null = $sb.AppendLine("| $(Format-Cell $r[0]) | $(Format-Cell $r[1]) |") }
         $null = $sb.AppendLine()
     }
 
