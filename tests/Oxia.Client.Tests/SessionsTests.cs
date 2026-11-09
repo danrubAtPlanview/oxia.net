@@ -15,6 +15,9 @@
 //        CancellationToken: the test sets Sessions.ContextError (see Sessions.cs).
 //      * t.Context() is a token cancelled when the test finishes.
 //      * cs.started <- err (TestSessions_FailedSessionStartDoesNotDeadlock) is ClientSession.FailStart(err).
+//      * TestSessions_KeepAliveRetryDelayDoesNotGrow lives in the nested class KeepAliveTimingTests, VERBATIM, in the non-parallel
+//        "R1 serial" collection: its 7 consecutive 2 s measurements tolerate 350 ms of jitter each and flaked once in four full Linux runs
+//        when run beside ~1800 parallel tests (docs/linux-validation.md).  The assertion is unchanged.
 // =====================================================================================================================
 using System.Diagnostics;
 using System.Threading.Channels;
@@ -110,44 +113,54 @@ public class SessionsTests
     // A failed heartbeat is retried after a backoff, which a successful heartbeat must reset: otherwise every failure over
     // the lifetime of the session makes the next retry wait longer, until a single failure is enough to make the session
     // expire on the server.
-    [Fact]
-    public async Task TestSessions_KeepAliveRetryDelayDoesNotGrow()
+    //
+    // Linux validation (L): the test measures 7 consecutive gaps of 2.0-2.15 s against a 2.5 s bound, i.e. it tolerates 350 ms of scheduling
+    // jitter per gap.  Next to ~1800 tests running in parallel on an 8-core Linux box one gap took 2.546 s (1 failure in 4 full runs); on a
+    // 4-core CI runner it would be worse.  The body and the assertion are unchanged (nothing was widened); only its home is: a nested class
+    // in the non-parallel "R1 serial" collection (like RpcProviderTimingTests), so the rest of the suite is not running while it measures.
+    // It keeps the private helpers of SessionsTests (Start, NewClientOptions, Execute) by being nested.
+    [Collection("R1 serial")]
+    public class KeepAliveTimingTests
     {
-        var server = new FlakyKeepAliveServer();
-        await using var grpc = await Start(server);
-
-        var options = NewClientOptions(grpc.Address);
-        var shardManager = new StaticShardManager { LeaderAddress = options.ServiceAddress };
-        var rpcProvider = RpcProvider.Create(CancellationToken.None, options.Namespace, null, null, options.ServiceAddress,
-            () => shardManager);
-
-        using var cts = new CancellationTokenSource();
-        try
+        [Fact]
+        public async Task TestSessions_KeepAliveRetryDelayDoesNotGrow()
         {
-            var s = new Sessions(cts.Token, shardManager, rpcProvider, options);
-            var result = await Execute(s, () => 0);
-            Assert.Null(result.Err);
+            var server = new FlakyKeepAliveServer();
+            await using var grpc = await Start(server);
 
-            async Task<long> NextHeartbeat()
-            {
-                var read = server.Heartbeats.Reader.ReadAsync().AsTask();
-                return await Wait.WithTimeout(read, Ten, "no heartbeat received");
-            }
+            var options = NewClientOptions(grpc.Address);
+            var shardManager = new StaticShardManager { LeaderAddress = options.ServiceAddress };
+            var rpcProvider = RpcProvider.Create(CancellationToken.None, options.Namespace, null, null, options.ServiceAddress,
+                () => shardManager);
 
-            // A failed heartbeat is retried after the backoff, then a full tick of the keep-alive ticker, which is 2s here.
-            // The first backoff is 150ms at the most: without a reset, the one after the 7th failure is 570ms at least.
-            for (int failure = 1; failure <= 7; failure++)
+            using var cts = new CancellationTokenSource();
+            try
             {
-                long failedAt = await NextHeartbeat();
-                long next = await NextHeartbeat();
-                var retryDelay = Stopwatch.GetElapsedTime(failedAt, next) - TimeSpan.FromSeconds(2);
-                Assert.True(retryDelay < TimeSpan.FromMilliseconds(500), $"retry delay after failure {failure}: {retryDelay}");
+                var s = new Sessions(cts.Token, shardManager, rpcProvider, options);
+                var result = await Execute(s, () => 0);
+                Assert.Null(result.Err);
+
+                async Task<long> NextHeartbeat()
+                {
+                    var read = server.Heartbeats.Reader.ReadAsync().AsTask();
+                    return await Wait.WithTimeout(read, Ten, "no heartbeat received");
+                }
+
+                // A failed heartbeat is retried after the backoff, then a full tick of the keep-alive ticker, which is 2s here.
+                // The first backoff is 150ms at the most: without a reset, the one after the 7th failure is 570ms at least.
+                for (int failure = 1; failure <= 7; failure++)
+                {
+                    long failedAt = await NextHeartbeat();
+                    long next = await NextHeartbeat();
+                    var retryDelay = Stopwatch.GetElapsedTime(failedAt, next) - TimeSpan.FromSeconds(2);
+                    Assert.True(retryDelay < TimeSpan.FromMilliseconds(500), $"retry delay after failure {failure}: {retryDelay}");
+                }
             }
-        }
-        finally
-        {
-            cts.Cancel();
-            await rpcProvider.CloseAsync();
+            finally
+            {
+                cts.Cancel();
+                await rpcProvider.CloseAsync();
+            }
         }
     }
 

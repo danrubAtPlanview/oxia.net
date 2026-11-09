@@ -9,8 +9,10 @@
 //              lets the tiered JIT promote the hot paths; the best of 3 measurements counts (a GC or a tiering step can add noise, never
 //              remove allocations).  Release builds only (Debug allocates differently): the tests skip themselves in Debug like the
 //              other allocation tests.  The tests run alone ("Z1 serial"): the counter is process-wide.
-//              Fewer than 16 operations are in flight at a time so that the batchers' queues (ProcessorCount slots) never fill: the
-//              slow path of AddAsync (a full queue) is the batcher's own cost and is not what is measured here.
+//              Only 12 operations are in flight at a time, far below the batcher queue capacity (max(4096, MaxRequestsPerBatch), independent
+//              of the core count): the slow path of AddAsync (a full queue) is the batcher's own cost and is not what is measured here.
+//              Linux validation (L): the old "skip below 14 cores" guard was removed (stale since the queue capacity no longer follows
+//              ProcessorCount; it disabled these budgets on 4-core ubuntu-latest runners).
 //   Budgets  : every non-zero budget is justified at its test.  What the budgets do NOT contain, by design: Grpc.Net.Client and the HTTP/2
 //              stack (about 2.3 KB per write-stream message, about 9 KB per Read / RangeScan call, shared by all the operations of a
 //              batch -- see docs/performance-allocation.md and `dotnet run -c Release --project benchmarks/Oxia.Client.Benchmarks -- alloc`).
@@ -36,11 +38,10 @@ public class EndToEndAllocationTests(ITestOutputHelper output)
 #if DEBUG
         Assert.Skip("allocation budgets only mean something in Release (dotnet test -c Release)");
 #endif
-        if (Environment.ProcessorCount < Window + 2)
-        {
-            // the batcher queues have ProcessorCount slots: with fewer cores than the window the slow path of AddAsync would be measured
-            Assert.Skip($"needs at least {Window + 2} cores so that {Window} operations in flight stay on the fast path of the batcher queue");
-        }
+        // Linux validation (L): this used to skip on machines with fewer than Window + 2 cores ("the batcher queues have ProcessorCount
+        // slots").  That premise went stale when the client's queue capacity became max(4096, MaxRequestsPerBatch)
+        // (Internal.Batch.BatcherFactory.DefaultQueueCapacity, which FakeWireClient uses): 12 operations in flight fit on any machine, and
+        // the skip silently disabled all ten budgets on 4-core CI runners (ubuntu-latest) and small AWS instances.
     }
 
     /// <summary>

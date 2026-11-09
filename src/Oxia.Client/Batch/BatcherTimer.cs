@@ -18,6 +18,11 @@
 //        short lock; no allocation once the heap is warm.  Callbacks run on the service thread and must not block (they write a tick).
 //      * A linger is still a MINIMUM: the batch is completed at deadline + wake-up latency (~0.1..1 ms), never before the deadline, because
 //        the batcher loop checks its own Stopwatch timestamp.  For linger values >= the platform tick the behaviour is unchanged.
+//      * LINUX / macOS (validated in Docker on Ubuntu 24.04, docs/linux-validation.md): the portable path IS the production path there.  Monitor.Wait
+//        maps to pthread_cond_timedwait, whose resolution is ~50 us; the wait is a whole number of milliseconds rounded UP, so a 1 ms and a 5 ms
+//        linger measure ~0.1 ms (median) late at the service and 1.2 / 5.3 ms end to end through a batcher.  Stopwatch.Frequency is 1e9 there
+//        (1e7 on Windows): TicksToMilliseconds therefore splits its division so `ticks * 1000` cannot overflow for very long waits.
+//        Tests that run the portable path on Linux: Throughput/LingerTimerPortableTests.cs (+ the existing LingerTimerTests, which use it too).
 // =====================================================================================================================
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -208,9 +213,15 @@ internal sealed class LingerTimerService
         NativeTimer.Set(_hrTimer!, -Math.Max(1, hundredNs));
     }
 
-    private static int TicksToMilliseconds(long ticks)
+    /// <summary>
+    /// Stopwatch ticks to whole milliseconds, rounded UP (never wake before the deadline), clamped to [1, int.MaxValue - 1].
+    /// The division is split so that nothing overflows: Stopwatch.Frequency is 1e9 on Linux / macOS (ns), where the naive
+    /// <c>ticks * 1000</c> overflowed beyond ~106 days and then clamped to a 1 ms wake-up loop (Linux validation, docs/linux-validation.md).
+    /// </summary>
+    internal static int TicksToMilliseconds(long ticks)
     {
-        long ms = (ticks * 1000 + Stopwatch.Frequency - 1) / Stopwatch.Frequency; // round up: never wake before the deadline
+        long frequency = Stopwatch.Frequency;
+        long ms = ticks / frequency * 1000 + ((ticks % frequency) * 1000 + frequency - 1) / frequency;
         return (int)Math.Clamp(ms, 1, int.MaxValue - 1);
     }
 }
