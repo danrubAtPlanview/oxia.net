@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea (Discussions)
+    url: https://github.com/danrubAtPlanview/oxia.net/discussions
+    about: Ask a usage question, or float an idea before opening a feature request.
+  - name: Report a security vulnerability
+    url: https://github.com/danrubAtPlanview/oxia.net/security/advisories/new
+    about: Please do not open a public issue for a vulnerability. Use GitHub's private vulnerability reporting (see SECURITY.md).
+  - name: Problem with the Oxia server or the Go client
+    url: https://github.com/oxia-db/oxia/issues
+    about: This repository is an unofficial .NET port of the Go client. Issues in the server, the coordinator or the Go client belong to the upstream project.
