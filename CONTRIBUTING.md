@@ -98,7 +98,8 @@ Clean up everything the fixture created (only containers labelled `oxia.net.test
 
 ## The rules of a port
 
-The full contract is [DESIGN.md](DESIGN.md); read it before your first change. The rules that reviewers check:
+The full contract is [DESIGN.md](DESIGN.md); read it before your first change. (Its "Component ownership" and "Worktree protocol" sections record how the initial port was organised; they are history, not a
+process you have to follow.) The rules that reviewers check:
 
 1. **Faithful first.** Same behaviour, same edge cases, same error semantics and messages, same wire protocol as the Go client. When Go and "idiomatic .NET"
    disagree, Go behaviour wins; the API *shape* is made .NET-friendly only where Go's shape cannot exist (channels, `context.Context`, multiple returns).
