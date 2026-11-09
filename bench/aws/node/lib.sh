@@ -52,6 +52,9 @@ iso_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # usage_from_header FILE: prints the leading comment block of a script (without the shebang) as its --help text.
 usage_from_header() { awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$1"; }
 
+# usage_short FILE: the first line of the header (the synopsis) and a pointer to --help; for usage errors.
+usage_short() { awk 'NR == 2 { sub(/^# ?/, ""); print; print "(run it with --help for the full description)"; exit }' "$1"; }
+
 # ---------------------------------------------------------------------------------------------------------------------
 # environment
 # ---------------------------------------------------------------------------------------------------------------------

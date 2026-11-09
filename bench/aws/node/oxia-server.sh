@@ -400,5 +400,5 @@ case ${1:-} in
   status) shift; cmd_status "$@" ;;
   stats) shift; cmd_stats "$@" ;;
   -h | --help | help) usage_from_header "${BASH_SOURCE[0]}" ;;
-  *) usage_from_header "${BASH_SOURCE[0]}" >&2; exit 2 ;;
+  *) usage_short "${BASH_SOURCE[0]}" >&2; exit 2 ;;
 esac

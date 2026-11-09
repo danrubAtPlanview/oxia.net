@@ -31,7 +31,7 @@ source "$here/lib.sh"
 case ${1:-} in
   server | client) role=$1 ;;
   -h | --help) usage_from_header "${BASH_SOURCE[0]}"; exit 0 ;;
-  *) usage_from_header "${BASH_SOURCE[0]}" >&2; exit 2 ;;
+  *) usage_short "${BASH_SOURCE[0]}" >&2; exit 2 ;;
 esac
 require_root
 
