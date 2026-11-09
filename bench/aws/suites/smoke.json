@@ -1,0 +1,12 @@
+{
+  "name": "smoke",
+  "description": "One short scenario per implementation: proves the whole pipeline (stack, artifacts, server reset, both load tools, report, teardown). ~16 minutes including create and delete.",
+  "defaults": {
+    "client": "async", "ops": "put,get", "readPercent": 50, "keyCount": 100000, "valueSize": 128, "producers": 64,
+    "linger": "5ms", "maxRequestsPerBatch": 1000, "shards": 1, "serverSync": false, "notifications": true,
+    "durationSec": 10, "warmupSec": 3, "runs": 1
+  },
+  "scenarios": [
+    { "id": "S1", "name": "async, 64 producers, put+get 50/50, linger 5 ms, 1 shard" }
+  ]
+}

@@ -1,0 +1,294 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  oxia.net on-demand benchmark environment: one isolated VPC, one Oxia server instance and one load-generator instance (Amazon Linux 2023),
+  a per-run S3 bucket and an SSM-only instance role. NO inbound rules from the internet, no key pairs. Deleting this stack deletes everything
+  (the operator script empties the bucket first). Instances also terminate themselves after MaxLifetimeMinutes (dead-man switch).
+
+Parameters:
+  RunId:
+    Type: String
+    Description: Unique run id (lowercase letters, digits, hyphens); used in names and tags.
+    AllowedPattern: "[a-z0-9][a-z0-9-]{3,36}"
+  Arch:
+    Type: String
+    Default: x86_64
+    AllowedValues: [x86_64, arm64]
+  ServerInstanceType:
+    Type: String
+    Default: c6i.2xlarge
+  ClientInstanceType:
+    Type: String
+    Default: c6i.2xlarge
+  AvailabilityZone:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: A zone that offers both instance types (the operator script picks one).
+  UsePlacementGroup:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+  MaxLifetimeMinutes:
+    Type: Number
+    Default: 240
+    MinValue: 30
+    MaxValue: 1440
+    Description: Dead-man switch. The instances shut down (and, by InstanceInitiatedShutdownBehavior, terminate) after this many minutes.
+  ExpiresAt:
+    Type: String
+    Description: UTC ISO-8601 time after which `bench.ps1 Reap` may delete this stack (tag only).
+  Owner:
+    Type: String
+    Default: unknown
+    Description: Who started the run (tag only).
+  DataVolumeSizeGiB:
+    Type: Number
+    Default: 100
+  DataVolumeIops:
+    Type: Number
+    Default: 6000
+  DataVolumeThroughput:
+    Type: Number
+    Default: 500
+  AmiX86:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  AmiArm:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+
+Conditions:
+  IsArm: !Equals [!Ref Arch, arm64]
+  PlacementGroupOn: !Equals [!Ref UsePlacementGroup, "true"]
+
+Resources:
+  # ------------------------------------------------------------------ network
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.77.0.0/24
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{Key: Name, Value: !Sub "oxia-bench-${RunId}"}]
+
+  Igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{Key: Name, Value: !Sub "oxia-bench-${RunId}"}]
+
+  IgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref Igw
+
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.77.0.0/25
+      AvailabilityZone: !Ref AvailabilityZone
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: !Sub "oxia-bench-${RunId}"}]
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{Key: Name, Value: !Sub "oxia-bench-${RunId}"}]
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref Igw
+
+  SubnetRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Subnet
+      RouteTableId: !Ref RouteTable
+
+  # S3 traffic (artifact download, result upload) stays on the AWS network
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref RouteTable]
+
+  ClientSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: oxia-bench client (no inbound)
+      VpcId: !Ref Vpc
+      Tags: [{Key: Name, Value: !Sub "oxia-bench-${RunId}-client"}]
+
+  ServerSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: oxia-bench server (client SG only)
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - {IpProtocol: tcp, FromPort: 6648, ToPort: 6649, SourceSecurityGroupId: !Ref ClientSg, Description: Oxia public and internal ports from the client}
+      Tags: [{Key: Name, Value: !Sub "oxia-bench-${RunId}-server"}]
+
+  PlacementGroup:
+    Type: AWS::EC2::PlacementGroup
+    Condition: PlacementGroupOn
+    Properties:
+      Strategy: cluster
+
+  # ------------------------------------------------------------------ storage, identity
+  Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub "oxia-bench-${RunId}-${AWS::AccountId}"
+      PublicAccessBlockConfiguration: {BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}
+      LifecycleConfiguration:
+        Rules:
+          - {Id: expire-everything, Status: Enabled, ExpirationInDays: 3}
+          - {Id: abort-multipart, Status: Enabled, AbortIncompleteMultipartUpload: {DaysAfterInitiation: 1}}
+
+  BucketTlsOnly:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt Bucket.Arn, !Sub "${Bucket.Arn}/*"]
+            Condition: {Bool: {"aws:SecureTransport": "false"}}
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - {Effect: Allow, Principal: {Service: ec2.amazonaws.com}, Action: "sts:AssumeRole"}
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: run-bucket-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - {Effect: Allow, Action: ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"], Resource: !Sub "${Bucket.Arn}/*"}
+              - {Effect: Allow, Action: ["s3:ListBucket", "s3:GetBucketLocation"], Resource: !GetAtt Bucket.Arn}
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # ------------------------------------------------------------------ instances
+  Server:
+    Type: AWS::EC2::Instance
+    DependsOn: [DefaultRoute, S3Endpoint]
+    Properties:
+      ImageId: !If [IsArm, !Ref AmiArm, !Ref AmiX86]
+      InstanceType: !Ref ServerInstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      InstanceInitiatedShutdownBehavior: terminate
+      EbsOptimized: true
+      PlacementGroupName: !If [PlacementGroupOn, !Ref PlacementGroup, !Ref "AWS::NoValue"]
+      MetadataOptions: {HttpTokens: required, HttpPutResponseHopLimit: 2, HttpEndpoint: enabled}
+      NetworkInterfaces:
+        - {DeviceIndex: "0", SubnetId: !Ref Subnet, AssociatePublicIpAddress: true, GroupSet: [!Ref ServerSg]}
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: {VolumeType: gp3, VolumeSize: 40, DeleteOnTermination: true, Encrypted: true}
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # oxia-bench server: dead-man switch first (so the instance goes away even if everything below fails), then the data volume.
+          shutdown -h +${MaxLifetimeMinutes} "oxia-bench dead-man switch" || true
+          mkdir -p /var/lib/oxia-bench /opt/oxia-bench/bin /var/log/oxia-bench /data
+          ROOT_DISK=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)" | head -1)
+          DATA_DISK=""
+          # the data volume is attached by CloudFormation after the instance is running: wait for it (up to 6 minutes)
+          for i in $(seq 1 180); do
+            for d in $(lsblk -dno NAME,TYPE | awk '$2=="disk"{print $1}'); do
+              if [ "$d" != "$ROOT_DISK" ] && ! lsblk -no MOUNTPOINT "/dev/$d" | grep -q .; then DATA_DISK="/dev/$d"; break; fi
+            done
+            [ -n "$DATA_DISK" ] && break
+            sleep 2
+          done
+          if [ -n "$DATA_DISK" ]; then
+            mkfs.xfs -f "$DATA_DISK" && mount -o noatime,nodiratime "$DATA_DISK" /data
+            echo "data volume $DATA_DISK mounted on /data" > /var/lib/oxia-bench/data-volume.txt
+          else
+            echo "NO DATA DISK FOUND, /data is on the root volume" > /var/lib/oxia-bench/data-volume.txt
+          fi
+          touch /var/lib/oxia-bench/userdata-done
+      Tags:
+        - {Key: Name, Value: !Sub "oxia-bench-${RunId}-server"}
+        - {Key: oxia-bench-role, Value: server}
+
+  # AWS::EC2::Instance block device mappings cannot set gp3 Throughput, so the data disk is its own volume (deleted with the stack).
+  DataVolume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Delete
+    Properties:
+      AvailabilityZone: !Ref AvailabilityZone
+      Size: !Ref DataVolumeSizeGiB
+      VolumeType: gp3
+      Iops: !Ref DataVolumeIops
+      Throughput: !Ref DataVolumeThroughput
+      Encrypted: true
+      Tags: [{Key: Name, Value: !Sub "oxia-bench-${RunId}-data"}]
+
+  DataVolumeAttachment:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref Server
+      VolumeId: !Ref DataVolume
+      Device: /dev/sdf
+
+  Client:
+    Type: AWS::EC2::Instance
+    DependsOn: [DefaultRoute, S3Endpoint]
+    Properties:
+      ImageId: !If [IsArm, !Ref AmiArm, !Ref AmiX86]
+      InstanceType: !Ref ClientInstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      InstanceInitiatedShutdownBehavior: terminate
+      EbsOptimized: true
+      PlacementGroupName: !If [PlacementGroupOn, !Ref PlacementGroup, !Ref "AWS::NoValue"]
+      MetadataOptions: {HttpTokens: required, HttpPutResponseHopLimit: 2, HttpEndpoint: enabled}
+      NetworkInterfaces:
+        - {DeviceIndex: "0", SubnetId: !Ref Subnet, AssociatePublicIpAddress: true, GroupSet: [!Ref ClientSg]}
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: {VolumeType: gp3, VolumeSize: 30, DeleteOnTermination: true, Encrypted: true}
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          shutdown -h +${MaxLifetimeMinutes} "oxia-bench dead-man switch" || true
+          mkdir -p /var/lib/oxia-bench /opt/oxia-bench/bin /var/log/oxia-bench
+          touch /var/lib/oxia-bench/userdata-done
+      Tags:
+        - {Key: Name, Value: !Sub "oxia-bench-${RunId}-client"}
+        - {Key: oxia-bench-role, Value: client}
+
+Outputs:
+  RunId:            {Value: !Ref RunId}
+  BucketName:       {Value: !Ref Bucket}
+  ServerInstanceId: {Value: !Ref Server}
+  ClientInstanceId: {Value: !Ref Client}
+  ServerPrivateIp:  {Value: !GetAtt Server.PrivateIp}
+  ClientPrivateIp:  {Value: !GetAtt Client.PrivateIp}
+  VpcId:            {Value: !Ref Vpc}
+  AvailabilityZone: {Value: !Ref AvailabilityZone}
+  ImageId:          {Value: !If [IsArm, !Ref AmiArm, !Ref AmiX86]}

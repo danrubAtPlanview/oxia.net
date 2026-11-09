@@ -1,0 +1,27 @@
+{
+  "name": "full",
+  "description": "standard + producer sweep, 16 shards, value-size sweep, delete mix, durable (fsync) server. 3 repetitions. ~1.6 hours including create and delete.",
+  "defaults": {
+    "client": "async", "ops": "put,get", "readPercent": 50, "keyCount": 100000, "valueSize": 128, "producers": 256,
+    "linger": "5ms", "maxRequestsPerBatch": 1000, "shards": 1, "serverSync": false, "notifications": true,
+    "durationSec": 15, "warmupSec": 3, "runs": 3
+  },
+  "scenarios": [
+    { "id": "A", "name": "async, 256 producers, put+get 50/50, linger 5 ms, 1 shard" },
+    { "id": "B", "name": "async, 1000 producers, put only, linger 5 ms, 1 shard", "ops": "put", "producers": 1000 },
+    { "id": "C", "name": "sync client, 64 callers, put+get 50/50", "client": "sync", "producers": 64 },
+    { "id": "D", "name": "async, 1000 producers, put+get, linger 1 ms, 4 shards", "producers": 1000, "linger": "1ms", "shards": 4 },
+    { "id": "E", "name": "async, 256 producers, put only, 1 KiB values", "ops": "put", "valueSize": 1024 },
+    { "id": "F", "name": "async, 64 producers, put+get, linger 0 (no batching)", "producers": 64, "linger": "0ms" },
+    { "id": "G", "name": "async, open loop 20k ops/s, put+get (latency under fixed load)", "rate": 20000, "producers": 256 },
+    { "id": "P16",   "name": "producer sweep: 16 in flight",   "producers": 16 },
+    { "id": "P64",   "name": "producer sweep: 64 in flight",   "producers": 64 },
+    { "id": "P1000", "name": "producer sweep: 1000 in flight", "producers": 1000 },
+    { "id": "P4000", "name": "producer sweep: 4000 in flight", "producers": 4000 },
+    { "id": "H", "name": "async, 4000 producers, put+get, linger 1 ms, 16 shards", "producers": 4000, "linger": "1ms", "shards": 16 },
+    { "id": "V16K", "name": "async, 256 producers, put only, 16 KiB values", "ops": "put", "valueSize": 16384 },
+    { "id": "M", "name": "async, 256 producers, put+get+delete mix", "ops": "put,get,delete", "readPercent": 40 },
+    { "id": "SY", "name": "sync client, 256 callers, put+get 50/50", "client": "sync", "producers": 256 },
+    { "id": "DUR", "name": "durable server (wal fsync on), 256 producers, put only", "ops": "put", "serverSync": true }
+  ]
+}

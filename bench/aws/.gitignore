@@ -1,0 +1,4 @@
+# run state, built artifacts and results never go into git (results worth keeping are published as docs/benchmark-aws.md)
+.state/
+.artifacts/
+results/

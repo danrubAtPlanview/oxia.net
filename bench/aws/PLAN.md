@@ -48,14 +48,15 @@ Everything is one CloudFormation stack named `oxia-bench-<runId>`; deleting the 
 | Client | `c6i.2xlarge` | `-Size large` → `c6i.4xlarge`; `-Arch arm64` → `c7g.*` (Graviton) |
 | AMI | latest Amazon Linux 2023 (SSM public parameter, x86_64 or arm64) | resolved by CloudFormation at create time, recorded |
 | Placement | cluster placement group (same AZ) | `-NoPlacementGroup` if capacity is short |
-| Storage | 40 GiB gp3 root + 100 GiB gp3 data (6000 IOPS, 500 MB/s) on the server; 30 GiB root on the client | deleted with the stack |
+| Storage | 40 GiB gp3 root + a separate 100 GiB gp3 data volume (6000 IOPS, 500 MB/s; `AWS::EC2::Volume`, because an instance block-device mapping cannot set gp3 throughput) on the server; 30 GiB root on the client | all deleted with the stack |
 | Network | dedicated VPC, public subnet, IGW, S3 gateway endpoint; **no inbound rule** except server ← client on 6648/6649 | SSM over the IGW |
 | OS tuning | `nofile` 1 048 576, `somaxconn` 4096, `tcp_max_syn_backlog`, THP off, `vm.swappiness=1`, irqbalance default | applied by `bootstrap-*.sh`, recorded |
 | Software on the server | Oxia static binary extracted from `oxia/oxia:<tag>` (linux/<arch>) | `-OxiaImage` to pin a digest |
 | Software on the client | self-contained .NET load tool + static Go load tool | built on the operator machine from the working tree |
 
-Estimated cost (us-west-2 on-demand, 2026 list prices ≈): 2 × c6i.2xlarge ≈ **$0.68/h** + gp3 ≈ $0.02/h + negligible S3/SSM. A `smoke` run (≈ 25 min incl. create/delete) ≈ **$0.35**,
-`standard` (≈ 1.5 h) ≈ **$1.1**, `full` (≈ 4 h) ≈ **$2.9**; `-Size large` doubles it. The script prints this estimate and the hard stop time before creating anything.
+Estimated cost (us-west-2 on-demand list prices, approximate): 2 × c6i.2xlarge ≈ **$0.71/h** including storage. `bench.ps1 Plan` prints the estimate for the chosen suite before anything is created.
+Measured on the QA account: stack create + bootstrap **≈ 4 min**, stack delete + verification **≈ 2.5 min**. Estimates: `smoke` ≈ 16 min ≈ **$0.20**, `standard` ≈ 50 min ≈ **$0.60**,
+`full` ≈ 1.6 h ≈ **$1.15**; `-Size large` roughly doubles it. The hard stop (dead-man switch) bounds the worst case at `MaxLifetimeMinutes` (default 240 min ≈ $2.9).
 
 ## 4. Safety: the environment is ALWAYS torn down
 
@@ -134,7 +135,15 @@ Artifacts layout produced by `Publish-Artifacts.ps1 -Arch <a> -OutDir <dir>` (an
 | P3 | 3-node replicated cluster (coordinator + 3 data servers, one AZ and multi-AZ variants), TLS on, leader-change under load | designed, not built |
 | P4 | scheduled run (GitHub Actions OIDC → role) publishing a trend page | not built |
 
-## 9. Risks and open questions
+## 9. Validation status
+
+The orchestration was exercised against the real QA account with **stub artifacts** (two `t3.small` instances, 60-minute dead-man switch): stack creation (VPC, S3 endpoint, security groups, bucket, role,
+instances, separate data volume), artifact upload and install over SSM, per-run server reset / load / stats round trips, report generation, and the guaranteed teardown, which ended in
+`TEARDOWN VERIFIED` and an independent `Status` showing no stacks, instances, volumes, VPCs, buckets or roles. The same self-test caught (and the plan now documents) the `Throughput`
+restriction of instance block-device mappings and made the failure path print CloudFormation `DescribeEvents` validation details even though `--on-failure DELETE` removes the failed stack.
+Real-binary results: see `docs/benchmark-aws.md` once published.
+
+## 10. Risks and open questions
 
 * **IAM permissions of the QA profile** (role/instance-profile creation) are only provable by trying; fallback: pass an existing instance profile with `-InstanceProfile`.
 * **Placement-group capacity**: `-NoPlacementGroup` fallback.
