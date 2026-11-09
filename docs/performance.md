@@ -248,8 +248,10 @@ Three alternating repetitions of B and F: B 4.0 -> 3.5 us (-12 %) for -5 % throu
 
 1. The excess is **thread pool spin-waiting and wake-up cost, not work done by the client**: per operation the client's own managed code is a few microseconds (the batching scenarios show it), the rest is the
    runtime moving a request across 8-9 thread pool hops when nothing is batched. Go's scheduler can hand the next goroutine to the same thread without an operating-system wake-up, which is the likely reason it is cheaper here (not measured).
-2. It is a **trade-off, not a bug**: disabling the spin saves 12-33 % CPU per operation (and puts the .NET client below Go in A-D) but costs 5-9 % closed-loop throughput and some latency, because a woken worker
+2. It is a **trade-off, not a bug**: disabling the spin saves 12-33 % CPU per operation locally and 38-56 % on AWS (and puts the .NET client level with or below Go except in the unbatched F) but costs 0-10 % closed-loop throughput and some tail latency, because a woken worker
    needs longer to start. That is the choice of the application (section 9), not something a library can make for its host process: the setting is read when the runtime starts.
 3. What would remove the rest is **fewer hops per operation**; candidates are chunked completion dispatch, a shorter path between the batcher and the HTTP/2 writer, or a transport other than `Grpc.Net.Client`. Inline completions were
    measured again here and reduce the work items by 1-1.2 per operation without saving CPU; the others are large changes with a throughput risk and are **not** planned.
-4. Not measured here: AWS with the setting applied (the local container run differs in absolute numbers from the AWS run), TLS, and a cluster.
+4. **Confirmed on AWS** (run `20261109-115842-40ec`, [`benchmark-aws.md`](benchmark-aws.md), *Follow-up run*): with the setting the .NET client's CPU per operation fell by 52 % (C, now 0.93x Go), 56 % (F, 3.1x -> 1.4x Go)
+   and 38 % (G, 1.03x Go), for -9.5 % throughput in F and none in C and G (open loop). The local Docker figures above understate the effect (12-33 %).
+5. Not measured: TLS, a cluster, the setting on the batching scenarios (A, B, D, E) on AWS -- locally it saved 12-40 % there (A 40 %, D 20 %, B 12-16 %) for about 5 % of throughput in B.

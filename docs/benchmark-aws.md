@@ -21,7 +21,8 @@ Method and safety design: [bench/aws/PLAN.md](../bench/aws/PLAN.md).
   **Investigated afterwards** (local Linux reproduction with the same binaries, [`docs/performance.md`](performance.md) section 11): the excess is mostly the .NET thread pool, not client work. Idle workers
   spin before they sleep (about 28 % of the CPU samples in F are one native spin instruction), and an unbatched operation costs about 8.7 thread pool hops, each a worker wake-up. With
   `DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0` the CPU per operation fell by 12-33 % in every scenario (locally: C 22 -> 14 us against Go 16, F 301 -> 210 against 158, G 100 -> 79 against 65), at the price
-  of 5-9 % closed-loop throughput. It is a trade-off for the application to make (the setting is read at runtime start), not a default; it was **not** applied in this AWS run and has not been re-measured on AWS.
+  of 5-9 % closed-loop throughput. It is a trade-off for the application to make (the setting is read at runtime start), not a default; it was **not** applied in the run above. A follow-up run on the same instance types measured it on AWS: see
+  *Follow-up run* at the end of this file.
 * **Allocation** is lower for .NET in every scenario: 4-173 B per operation in the batching scenarios (A, B, D, E, G), 773 B for the sync client (C) and 4.9 KB without batching (F), against 1.7-6.0 KB for
   Go. The two numbers come from different counters (see the note under *Results*), so read them as an order of magnitude.
 * **Limits of the run:** one `oxia standalone` server (no cluster, no TLS, no authentication), one instance type (c6i.2xlarge), one region and availability zone, 3 repetitions per scenario, shared cloud
@@ -116,5 +117,29 @@ Throughput in ops/s (higher is better); latencies in ms (lower is better); CPU i
 * Closed-loop scenarios keep a fixed number of operations in flight; the open-loop scenario fixes the offered rate and measures latency at that load.
 * Raw data: `runs.csv` and `runs.jsonl` next to this report (full per-run RESULT lines and server statistics).
 
+## Follow-up run: the .NET thread pool spin-wait switched off
 
+Run `20261109-115842-40ec` (suite `cpu`, commit `e5d54a8`, otherwise the environment above: two `c6i.2xlarge`, one placement group, median of three alternating repetitions, server reset before every run).
+It repeats the three scenarios in which the .NET client used more CPU than the Go client, and adds the .NET client with `DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0` (the spin-wait of idle thread pool workers
+off; [`performance.md`](performance.md) section 11). Same Go client, same server, same binaries as above; only that environment variable differs between the two .NET rows.
 
+| Scenario | Client | ops/s | p50 ms | p99 ms | p99.9 ms | client CPU us/op |
+|---|---|---:|---:|---:|---:|---:|
+| C: sync client, 64 callers | .NET | 11,788 | 5.50 | 6.29 | 7.90 | 24.6 |
+| | **.NET, spin limit 0** | 12,121 | 5.50 | 6.42 | 7.11 | **11.9** |
+| | Go | 11,660 | 5.64 | 6.39 | 7.08 | 12.7 |
+| F: 64 producers, linger 0 | .NET | 11,143 | 5.80 | 14.68 | 16.58 | 237.8 |
+| | **.NET, spin limit 0** | 10,082 | 4.49 | 15.60 | 18.61 | **104.5** |
+| | Go | 11,311 | 4.92 | 12.78 | 13.70 | 76.2 |
+| G: open loop 20 k ops/s | .NET | 19,999 | 3.33 | 6.29 | 8.65 | 109.7 |
+| | **.NET, spin limit 0** | 19,997 | 3.42 | 6.46 | 9.50 | **67.5** |
+| | Go | 20,001 | 3.31 | 6.13 | 6.98 | 65.8 |
+
+* **CPU per operation fell by 52 % (C), 56 % (F) and 38 % (G).** Against Go that is C 1.93x -> **0.93x**, G 1.67x -> **1.03x** (level), F 3.12x -> **1.37x**. The investigation's explanation holds on AWS: most of the excess was
+  idle workers spinning, the effect is larger here than in the local Docker reproduction (12-33 %); why was not investigated.
+* **Throughput:** unchanged in C (+3 %, inside the min-max spread) and in the open loop G (the rate is fixed); **-9.5 % in F** (11,143 -> 10,082 ops/s), where 64 callers each wait for a round trip and a worker that has
+  gone to sleep needs longer to wake up. The median latency of F is lower (5.80 -> 4.49 ms), the tails are slightly higher (p99.9 16.6 -> 18.6 ms, G 8.65 -> 9.50 ms), so the cost sits in the slow operations (the
+  read calls), not in the median.
+* **What remains:** the unbatched F is still 1.37x Go's CPU per operation (about 9 thread pool hops per operation against Go's goroutine hand-offs). Everything else is level with or below the Go client.
+* The first run above and this one differ for the unchanged .NET rows (C 30.5 -> 24.6 us, F 247 -> 238 us): spin-waiting makes the CPU figure timing dependent, which is another reason to read differences below 10-20 % of
+  the CPU per operation as noise at these rates. Cost of the follow-up run: about $0.40, torn down and verified like the first.

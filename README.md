@@ -422,7 +422,8 @@ commit `5664944`, .NET 10.0.11, Go 1.27, Oxia server at the pinned upstream comm
 Two scenarios (F: no batching, 64 producers; G: open loop at 20 k ops/s) are in the full report. In short: the .NET client is ahead of or level with the Go client on throughput in every scenario, by the most when
 many producers share batches (B +56 %, E +21 %), and converges with it when the server is the limit (D). It is **not** better everywhere: it uses more client CPU per operation when each operation is its own RPC or
 the rate is low (C 1.8x, F 2.8x, G 1.6x the Go client's CPU per operation). That was traced to the .NET thread pool (idle workers spinning, about 9 worker wake-ups per unbatched operation):
-`DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0` cuts 12-33 % of the CPU per operation for 5-9 % of closed-loop throughput, see [`docs/performance.md`](docs/performance.md) section 11. The far tail was also
+`DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0` cut it by 38-56 % in a follow-up AWS run (C 0.93x, G 1.03x, F 1.4x the Go client's CPU per operation) for 0-10 % of closed-loop throughput, see
+[`docs/performance.md`](docs/performance.md) section 11 and the end of [`docs/benchmark-aws.md`](docs/benchmark-aws.md). The far tail was also
 worse in two scenarios (D p99.9 2.6x, A maximum 3.3x) and is not explained yet. One server node, no TLS or authentication, one instance type and region, three repetitions, shared cloud hardware: read
 differences below 5-10 % as noise.
 

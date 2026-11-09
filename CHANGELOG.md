@@ -21,6 +21,7 @@ The version of the **upstream** Go client this port tracks is recorded separatel
   [`docs/benchmark-aws.md`](docs/benchmark-aws.md): the .NET client against the Go client on two `c6i.2xlarge` instances.
 * Linux validation of the test suites: [`docs/linux-validation.md`](docs/linux-validation.md).
 * Investigation of the client CPU per operation without batching on Linux ([`docs/performance.md`](docs/performance.md) section 11) and the Docker tooling to reproduce it (`bench/cpu-repro`).
+  Confirmed on AWS with the new `cpu` suite (per-scenario tuning variants): the .NET thread pool spin-wait switched off cuts the CPU per operation by 38-56 % ([`docs/benchmark-aws.md`](docs/benchmark-aws.md)).
 
 ### Fixed
 
