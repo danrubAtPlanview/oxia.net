@@ -39,15 +39,15 @@ jobs:
     runs-on: ${{ inputs.os }}
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
 
       - name: Cache NuGet packages
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Packages.props', 'global.json') }}
@@ -65,7 +65,7 @@ jobs:
 
       - name: Upload BenchmarkDotNet artifacts
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: benchmarkdotnet-artifacts-${{ runner.os }}
           path: BenchmarkDotNet.Artifacts/
