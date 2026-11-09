@@ -42,7 +42,8 @@
 #   rss_mb                  peak resident set size (MiB) among the samples of the window;  rss_mb_end: the last one
 #   user_cpu_s, sys_cpu_s, window_s, cores, samples, since, until, window_clipped (true when the requested window starts before the
 #   first or ends after the last sample)
-# Samples are interpolated linearly at the window edges, so a 1 s sampling period does not bias a window of 10 s or more.
+# Samples are interpolated linearly at the window edges, so a 1 s sampling period does not bias a window of 10 s or more; when --until lies
+# after the newest sample, stats waits up to 3 s for the next one.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -352,6 +353,18 @@ cmd_stats() {
   [[ $t_from =~ $num ]] || die "--since EPOCH (seconds since the epoch) is required"
   [[ -z $t_to || $t_to =~ $num ]] || die "--until must be an epoch in seconds"
   [[ -s $file ]] || die "no CPU samples in $file (is the server running? start launches the sampler)"
+  # the sampler writes once a second: when the window ends after the newest sample, give the next sample (at most 3 s) time to arrive,
+  # otherwise the window would be clipped by up to a second and core-seconds under-reported
+  if [[ -n $t_to ]]; then
+    local waited=0 last
+    while ((waited < 15)); do
+      last=$(tail -n 1 "$file" | cut -d' ' -f1)
+      awk -v l="${last:-0}" -v t="$t_to" 'BEGIN { exit !(l + 0 >= t + 0) }' && break
+      server_running || break
+      sleep 0.2
+      waited=$((waited + 1))
+    done
+  fi
   local hz cores
   hz=$(getconf CLK_TCK)
   cores=$(nproc)

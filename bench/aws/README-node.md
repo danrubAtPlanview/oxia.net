@@ -122,7 +122,7 @@ oxia-server.sh stop | status | stats --since EPOCH [--until EPOCH]
 * stdout of `start`/`reset`: one JSON line `{"running":true,"pid":..,"mode":..,"port":..,"shards":..,"sync":..,"notifications":..,...,"ready_ms":..}`; `status` prints the same (`{"running":false}` and exit 1 when down).
 * **CPU sampler** (`cpu-sampler.sh`, started by `start`, ends with the server): once per second appends `epoch utime_ticks stime_ticks rss_kb total_jiffies idle_jiffies` to `cpu.log` (epoch with microseconds,
   ticks = `getconf CLK_TCK`, process values cover all threads, host values from `/proc/stat` with guest time not double counted and idle = idle+iowait). Pure bash builtins and `/proc` reads: no fork per sample except `sleep`.
-* **`stats --since E [--until U]`** (epoch seconds; `--until` defaults to the last sample) prints one JSON line. The counters are interpolated linearly at the window edges, so the 1 s sampling period does not bias windows of 10 s or more:
+* **`stats --since E [--until U]`** (epoch seconds; `--until` defaults to the last sample; when `--until` lies after the newest sample, `stats` waits up to 3 s for the next one so the window is not clipped) prints one JSON line. The counters are interpolated linearly at the window edges, so the 1 s sampling period does not bias windows of 10 s or more:
 
   | key | meaning |
   |---|---|

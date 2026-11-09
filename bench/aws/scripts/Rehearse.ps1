@@ -232,8 +232,9 @@ try {
             $stats = $r.StdOut | ConvertFrom-Json
             $res = ConvertFrom-ResultLine $result
             $runs.Add([pscustomobject]@{ Impl = $impl; N = $n; Result = $res; RawResult = $result; Stats = $stats })
-            Log ("{0}: {1:N0} ops/s, p99 {2:N2} ms, errors {3}; server {4:N0}% of one core, {5:N2} core-s over {6:N1} s, peak RSS {7:N0} MiB" -f
-                $impl, (Get-Num $res 'ops_per_s'), ((Get-Num $res 'p99_us') / 1000), $res['errors'], $stats.server_cpu_pct, $stats.server_cpu_s, $stats.window_s, $stats.rss_mb)
+            Log ("{0}: {1:N0} ops/s, p99 {2:N2} ms, errors {3}; server {4:N0}% of one core, {5:N2} core-s over {6:N1} s{8}, peak RSS {7:N0} MiB" -f
+                $impl, (Get-Num $res 'ops_per_s'), ((Get-Num $res 'p99_us') / 1000), $res['errors'], $stats.server_cpu_pct, $stats.server_cpu_s, $stats.window_s,
+                $stats.rss_mb, $(if ($stats.window_clipped) { ' (WINDOW CLIPPED)' } else { '' }))
         }
     }
 
