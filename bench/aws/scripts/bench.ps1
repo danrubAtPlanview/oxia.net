@@ -42,6 +42,7 @@ param(
     [switch]$AllowParallel,
     [switch]$SkipArtifacts,
     [string]$ArtifactsDir,
+    [string]$GoRef,
     [switch]$KeepOnFailure,
     [switch]$KeepAfterRun,
     [switch]$Publish,
@@ -123,7 +124,9 @@ function Invoke-Up {
         $artDir = if ($ArtifactsDir) { (Resolve-Path $ArtifactsDir).Path } else { Join-Path $script:Artifacts $Arch }
         if (-not $SkipArtifacts) {
             Write-Step "building Linux artifacts ($Arch) on this machine"
-            & (Join-Path $PSScriptRoot 'Publish-Artifacts.ps1') -Arch $Arch -OutDir $artDir -OxiaImage $OxiaImage | Out-Host
+            $pub = @{ Arch = $Arch; OutDir = $artDir; OxiaImage = $OxiaImage }
+            if ($GoRef) { $pub['GoRef'] = $GoRef }
+            & (Join-Path $PSScriptRoot 'Publish-Artifacts.ps1') @pub | Out-Host
             if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "Publish-Artifacts.ps1 failed (exit $LASTEXITCODE)" }
         }
         if (-not (Test-Path (Join-Path $artDir 'VERSIONS.json'))) { throw "no artifacts in $artDir (run without -SkipArtifacts)" }
@@ -153,13 +156,10 @@ function Invoke-Up {
         foreach ($n in @(@{ Role = 'server'; Id = $out.ServerInstanceId }, @{ Role = 'client'; Id = $out.ClientInstanceId })) {
             $script = @"
 set -euo pipefail
-mkdir -p $InstallDir /opt/oxia-bench/artifacts
+mkdir -p /opt/oxia-bench/artifacts
 for i in `$(seq 1 200); do [ -f /var/lib/oxia-bench/userdata-done ] && break; sleep 2; done
 aws s3 sync s3://$($out.BucketName)/artifacts/ /opt/oxia-bench/artifacts/ --region $($script:Region) --only-show-errors
-cp -f /opt/oxia-bench/artifacts/node/*.sh $InstallDir/
-for f in oxia oxia-load-dotnet oxia-load-go; do [ -f /opt/oxia-bench/artifacts/`$f ] && install -m 0755 /opt/oxia-bench/artifacts/`$f $InstallDir/`$f || true; done
-chmod +x $InstallDir/*.sh
-cp -f /opt/oxia-bench/artifacts/VERSIONS.json /opt/oxia-bench/VERSIONS.json
+bash /opt/oxia-bench/artifacts/node/install-artifacts.sh /opt/oxia-bench/artifacts >&2
 $InstallDir/bootstrap-node.sh $($n.Role) >&2
 mkdir -p /var/lib/oxia-bench
 $InstallDir/sysinfo.sh > /var/lib/oxia-bench/sysinfo.json
@@ -200,6 +200,20 @@ cat /var/lib/oxia-bench/sysinfo.json
 }
 
 # ====================================================================================================================== Run
+
+# Best effort: the raw logs of both nodes (load tool output, server log, CPU samples) are kept in the run bucket, which is deleted at teardown, so
+# download them into the results directory first.
+function Save-NodeLogs($State, [string]$RunDir) {
+    try {
+        Write-Step 'collecting the node logs'
+        foreach ($n in @(@{ Role = 'client'; Id = $State.clientInstanceId }, @{ Role = 'server'; Id = $State.serverInstanceId })) {
+            $cmd = "tar czf /tmp/$($n.Role)-logs.tgz -C / var/log/oxia-bench var/lib/oxia-bench 2>/dev/null; aws s3 cp /tmp/$($n.Role)-logs.tgz s3://$($State.bucket)/logs/$($n.Role)-logs.tgz --region $($script:Region) --only-show-errors"
+            $null = Invoke-Ssm -InstanceId $n.Id -TimeoutSec 120 -AllowFail -What "collect $($n.Role) logs" -Script $cmd
+            $null = Invoke-Aws s3 cp "s3://$($State.bucket)/logs/$($n.Role)-logs.tgz" (Join-Path $RunDir "$($n.Role)-node-logs.tgz") --only-show-errors -AllowFail
+        }
+    }
+    catch { Write-Warn "could not collect node logs: $($_.Exception.Message)" }
+}
 function Invoke-Run {
     $state = Get-State
     if (-not $state -or $state.status -ne 'ready') { throw "no ready environment (state: $(if ($state) { $state.status } else { 'none' })). Run 'Up' first." }
@@ -225,15 +239,17 @@ function Invoke-Run {
                         $remoteLog = "/var/log/oxia-bench/run-$tag.log"
                         $loadArgs = ConvertTo-LoadArgs -Scenario $s -Impl $impl -Addr $addr -OutFile $remoteLog
                         $timeout = [int]$s.warmupSec + [int]$s.durationSec + 240
-                        $r = Invoke-Ssm -InstanceId $state.clientInstanceId -TimeoutSec $timeout -What "load $tag" -Script "echo STARTEPOCH=`$(date +%s)`n$InstallDir/run-load.sh $loadArgs"
+                        $r = Invoke-Ssm -InstanceId $state.clientInstanceId -TimeoutSec $timeout -What "load $tag" -Script "$InstallDir/run-load.sh $loadArgs"
                         $r.Stdout | Set-Content (Join-Path $logs "$tag.log") -Encoding utf8
                         $line = Find-ResultLine $r.Stdout
                         if (-not $line) { throw "no RESULT line in the output of $tag" }
-                        $start = ($r.Stdout -split "`n" | Where-Object { $_ -like 'STARTEPOCH=*' } | Select-Object -First 1) -replace 'STARTEPOCH=', ''
-                        $since = [long]$start + [int]$s.warmupSec + 2
-                        $st = Invoke-Ssm -InstanceId $state.serverInstanceId -TimeoutSec 60 -AllowFail -What "server stats ($tag)" -Script "$InstallDir/oxia-server.sh stats --since $since"
+                        # the measured window (epoch seconds) printed by run-load.sh, for the server CPU statistics
+                        $win = ($r.Stdout -split "`n" | ForEach-Object { $_.TrimEnd("`r") } | Where-Object { $_ -like 'WINDOW since=*' } | Select-Object -Last 1)
                         $stats = $null
-                        if ($st.Status -eq 'Success') { try { $stats = ($st.Stdout.Trim() -split "`n" | Select-Object -Last 1) | ConvertFrom-Json } catch { } }
+                        if ($win -match 'since=([0-9.]+)\s+until=([0-9.]+)') {
+                            $st = Invoke-Ssm -InstanceId $state.serverInstanceId -TimeoutSec 60 -AllowFail -What "server stats ($tag)" -Script "$InstallDir/oxia-server.sh stats --since $($Matches[1]) --until $($Matches[2])"
+                            if ($st.Status -eq 'Success') { try { $stats = ($st.Stdout.Trim() -split "`n" | Select-Object -Last 1) | ConvertFrom-Json } catch { } }
+                        }
                         $record['result'] = ConvertFrom-ResultLine $line
                         $record['server'] = $stats
                         $record['ok'] = $true
@@ -254,6 +270,7 @@ function Invoke-Run {
             }
         }
     }
+    Save-NodeLogs -State $state -RunDir $runDir
     # stop the server so nothing is left running between Run and Down
     $null = Invoke-Ssm -InstanceId $state.serverInstanceId -TimeoutSec 60 -AllowFail -What 'server stop' -Script "$InstallDir/oxia-server.sh stop"
     if ($failures -gt 0) { throw "$failures of $total runs failed (see $runDir\failed.jsonl)" }

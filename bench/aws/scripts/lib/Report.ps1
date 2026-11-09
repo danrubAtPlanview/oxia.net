@@ -86,7 +86,13 @@ function New-Report {
         $ver = Get-Val $env 'versions'
         if ($ver) {
             foreach ($p in $ver.PSObject.Properties) {
+                if ($p.Name -eq 'files') { continue }
                 if ($p.Value -is [string] -or $p.Value -is [ValueType]) { $null = $sb.AppendLine("| versions.$($p.Name) | $($p.Value) |") }
+                elseif ($p.Value) {
+                    foreach ($q in $p.Value.PSObject.Properties) {
+                        if ($q.Value -is [string] -or $q.Value -is [ValueType]) { $null = $sb.AppendLine("| versions.$($p.Name).$($q.Name) | $($q.Value) |") }
+                    }
+                }
             }
         }
         $null = $sb.AppendLine()
@@ -104,7 +110,7 @@ function New-Report {
         $title = Get-Val $sRuns[0] 'scenarioName' $sid
         $null = $sb.AppendLine("### $sid - $title")
         $null = $sb.AppendLine()
-        $null = $sb.AppendLine("| Impl | ops/s (median) | min-max ops/s | p50 | p99 | p99.9 | max | client CPU us/op | alloc B/op | errors | server CPU % | runs |")
+        $null = $sb.AppendLine("| Impl | ops/s (median) | min-max ops/s | p50 | p99 | p99.9 | max | client CPU us/op | alloc B/op | errors | server CPU (% of 1 core) | runs |")
         $null = $sb.AppendLine("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
         $med = @{}
         foreach ($impl in 'dotnet', 'go') {

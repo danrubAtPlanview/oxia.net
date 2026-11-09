@@ -1,6 +1,6 @@
 # Builds the Go side of the head-to-head comparison (oxia-load.exe) from the pinned checkout of the Go client.
 #
-#   pwsh benchmarks/Oxia.Client.Benchmarks/Load/go/build.ps1 [-GoRef C:\Work-Experimental\oxia-go-ref] [-Out C:\Work-Experimental\oxia-load-build]
+#   pwsh benchmarks/Oxia.Client.Benchmarks/Load/go/build.ps1 [-GoRef <path to a checkout of oxia-db/oxia>] [-Out <build dir>]
 #                                                           [-GoOS linux] [-GoArch amd64|arm64] [-OutFile <path of the binary>]
 #
 # The sources are COPIED to $Out (the build directory, outside of the repository) and the `replace` directives pointing at the checkout are
@@ -12,8 +12,8 @@
 # default output $Out/oxia-load-<os>-<arch> (no .exe unless GOOS is windows).  -OutFile puts the finished binary elsewhere (the build
 # directory is still $Out).
 param(
-    [string]$GoRef = "C:\Work-Experimental\oxia-go-ref",
-    [string]$Out = "C:\Work-Experimental\oxia-load-build",
+    [string]$GoRef = $(if ($env:OXIA_GO_REF) { $env:OXIA_GO_REF } else { Join-Path $PSScriptRoot '..\..\..\..\..\oxia-go-ref' }),
+    [string]$Out = (Join-Path ([IO.Path]::GetTempPath()) "oxia-load-build"),
     [string]$GoOS = "",
     [string]$GoArch = "",
     [string]$OutFile = ""

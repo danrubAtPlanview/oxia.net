@@ -29,7 +29,7 @@
 .PARAMETER OutDir        default: <repo>/bench/aws/artifacts/<arch> (git-ignored).
 .PARAMETER OxiaImage     image to take the server from; pin a digest with oxia/oxia@sha256:...  Default oxia/oxia:nightly-beta
                          (the image the integration tests use; built from the pinned upstream commit).
-.PARAMETER GoRef         checkout of the Go client the Go twin is built against (read only).
+.PARAMETER GoRef         checkout of github.com/oxia-db/oxia at the pinned commit (read only). Default: $env:OXIA_GO_REF, else a sibling directory oxia-go-ref.
 .PARAMETER Force         rebuild even if the cache matches.
 #>
 [CmdletBinding()]
@@ -37,7 +37,7 @@ param(
     [Parameter(Mandatory)][ValidateSet('x64', 'arm64')][string]$Arch,
     [string]$OutDir,
     [string]$OxiaImage = 'oxia/oxia:nightly-beta',
-    [string]$GoRef = 'C:\Work-Experimental\oxia-go-ref',
+    [string]$GoRef = $(if ($env:OXIA_GO_REF) { $env:OXIA_GO_REF } else { Join-Path $PSScriptRoot '..\..\..\..\oxia-go-ref' }),
     [string]$OxiaPathInImage = '/oxia/bin/oxia',
     [string]$VerifyImage = 'amazonlinux:2023',
     [switch]$Force,
