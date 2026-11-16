@@ -6,6 +6,8 @@
     <RootNamespace>Oxia.TestSupport</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Grpc.HealthCheck" />
+    <PackageReference Include="Grpc.StatusProto" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="Grpc.AspNetCore" />
     <!-- xUnit v3 building blocks for helpers (IAsyncLifetime fixtures, Assert.Fail/Skip).  The versions are pinned to the
